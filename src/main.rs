@@ -1170,8 +1170,9 @@ fn clamp_tools(pos: egui::Pos2, ctx: &egui::Context) -> egui::Pos2 {
 
 /// The floating selection toolbar: 标记 / 摘录 / 笔记 / 复制.
 ///
-/// It opens where the drag ended, moves by its header and closes with ✕; the
-/// next selection brings it back.
+/// It opens where the drag ended, moves by its header and closes with the ×
+/// button; the next selection brings it back. The glyph is U+00D7 — CJK
+/// reading fonts have it but not U+2715, which renders as a box.
 fn selection_tools(st: &mut AppState, ctx: &egui::Context) {
     let Some(pos) = st.sel_tools_pos else {
         return;
@@ -1212,7 +1213,7 @@ fn selection_tools(st: &mut AppState, ctx: &egui::Context) {
                         head.on_hover_text("按住此处可拖动悬浮窗");
                         ui.separator();
                         if ui
-                            .small_button("✕")
+                            .small_button("×")
                             .on_hover_text("关闭悬浮窗（重新选中文字会再次出现）")
                             .clicked()
                         {
@@ -1367,7 +1368,6 @@ struct FsEntry {
 
 #[derive(Default)]
 struct FolderEv {
-    close: bool,
     refresh: bool,
     /// a branch was expanded or collapsed
     toggled: bool,
@@ -1442,17 +1442,11 @@ fn folder_children(
 
 fn apply_folder_events(st: &mut AppState, ev: FolderEv) {
     let FolderEv {
-        close,
         refresh,
         toggled,
         open_file,
     } = ev;
     let mut changed = false;
-    if close {
-        st.folder = None;
-        st.folder_cache.clear();
-        changed = true;
-    }
     if refresh {
         st.folder_cache.clear();
         changed = true;
@@ -1478,9 +1472,6 @@ fn folder_section(
         ui.horizontal(|ui| {
             if ui.small_button("刷新").on_hover_text("重新读取目录").clicked() {
                 ev.refresh = true;
-            }
-            if ui.small_button("关闭").on_hover_text("关闭目录").clicked() {
-                ev.close = true;
             }
         });
         ui.add_space(2.0);
