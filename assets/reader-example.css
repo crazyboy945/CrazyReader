@@ -1,0 +1,73 @@
+/* CrazyReader Markdown 示例样式表
+ *
+ * 用法：底部工具栏「样式」→「选择 CSS 文件…」选中本文件。
+ * 保存后修改本文件，阅读器会在 1.5 秒内自动重新载入。
+ * 支持的元素选择器：body、h1~h6、p、li、blockquote、pre、code、a、hr、img。
+ * 支持的属性：font-size、font-family、color、background、font-weight、font-style、
+ * text-decoration、line-height、margin、padding、border-left、text-align、
+ * text-indent、max-width。
+ */
+
+body {
+  font-size: 18px;
+  line-height: 1.9;
+  font-family: "楷体", "Microsoft YaHei", serif;
+  color: #332f2a;
+}
+
+h1 {
+  font-size: 2em;
+  color: #8e24aa;
+  text-align: center;
+}
+
+h2 {
+  font-size: 1.4em;
+  color: #1565c0;
+  background: #e3f2fd;
+  border-left: 6px solid #1565c0;
+  padding: 4px 10px;
+}
+
+h3 {
+  color: #2e7d32;
+  font-style: italic;
+}
+
+p {
+  text-indent: 2em;
+}
+
+blockquote {
+  background: #fff8e1;
+  border-left: 6px solid #f6c344;
+  color: #6d4c00;
+  padding: 10px 14px;
+}
+
+pre {
+  background: #263238;
+  color: #eceff1;
+  padding: 12px;
+}
+
+code {
+  color: #c2185b;
+}
+
+a {
+  color: #0d47a1;
+  text-decoration: underline;
+}
+
+li {
+  color: #37474f;
+}
+
+hr {
+  color: #cbb894;
+}
+
+img {
+  max-width: 90%;
+}

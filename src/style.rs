@@ -38,6 +38,7 @@ pub struct FontManager {
     pub available: Vec<(String, String)>,
     cache: HashMap<String, Arc<egui::FontData>>,
     applied: Option<String>,
+    applied_extras: Vec<String>,
 }
 
 impl FontManager {
@@ -51,7 +52,13 @@ impl FontManager {
             available,
             cache: HashMap::new(),
             applied: None,
+            applied_extras: Vec::new(),
         }
+    }
+
+    /// Whether a stylesheet may select this face on this machine.
+    pub fn has(&self, key: &str) -> bool {
+        self.available.iter().any(|(k, _)| k == key)
     }
 
     fn data(&mut self, key: &str) -> Option<Arc<egui::FontData>> {
@@ -70,8 +77,11 @@ impl FontManager {
     }
 
     /// Install `want` (or the first available font) as the UI font.
+    ///
+    /// `extra` names additional fonts to load — a stylesheet may ask for a
+    /// face the user never picked, and egui can only render what is installed.
     /// Returns the key actually in use, or `None` when no CJK font exists.
-    pub fn apply(&mut self, ctx: &egui::Context, want: &str) -> Option<String> {
+    pub fn apply(&mut self, ctx: &egui::Context, want: &str, extra: &[String]) -> Option<String> {
         if self.available.is_empty() {
             return None;
         }
@@ -81,7 +91,16 @@ impl FontManager {
             .any(|(k, _)| k == want)
             .then(|| want.to_string())
             .unwrap_or_else(|| self.available[0].0.clone());
-        if self.applied.as_deref() == Some(known.as_str()) {
+        let mut extras: Vec<String> = extra
+            .iter()
+            .filter(|k| **k != known && self.available.iter().any(|(a, _)| a == *k))
+            .cloned()
+            .collect();
+        extras.sort();
+        extras.dedup();
+        if self.applied.as_deref() == Some(known.as_str())
+            && self.applied_extras == extras
+        {
             return Some(known);
         }
         // The preferred font is primary; any other installed one stays as a
@@ -95,10 +114,15 @@ impl FontManager {
                 .unwrap_or_else(|| known.clone());
         }
         let mut fonts = egui::FontDefinitions::default();
+        let latin = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .and_then(|l| l.first().cloned());
         let mut keys = vec![known.clone()];
         if fallback != known {
             keys.push(fallback);
         }
+        keys.extend(extras.iter().cloned());
         let mut loaded = Vec::new();
         for k in keys {
             if let Some(d) = self.data(&k) {
@@ -120,18 +144,45 @@ impl FontManager {
                 list.insert(at, k.clone());
             }
         }
+        // A stylesheet selects a face by name, so each loaded font also gets a
+        // family of its own. The bundled Latin font leads for the same reason
+        // the comment above gives.
+        for k in &loaded {
+            let mut list = latin.iter().cloned().collect::<Vec<_>>();
+            list.push(k.clone());
+            fonts
+                .families
+                .insert(egui::FontFamily::Name(k.clone().into()), list);
+        }
         ctx.set_fonts(fonts);
         self.applied = Some(known.clone());
+        self.applied_extras = extras;
         Some(known)
     }
 }
 
 /// Reading-area palette derived from a user-chosen background color.
+#[derive(Clone, Copy)]
 pub struct ReadingTheme {
     pub fill: Color32,
     pub text: Color32,
     pub faint: Color32,
     pub extreme: Color32,
+}
+
+/// The one blue the whole UI points with: active tab, current chapter, headers.
+pub fn accent(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(0x8F, 0xA7, 0xFF)
+    } else {
+        Color32::from_rgb(0x3B, 0x5B, 0xDB)
+    }
+}
+
+/// A translucent wash of [`accent`], for hover and selection backgrounds.
+pub fn accent_soft(dark: bool, alpha: u8) -> Color32 {
+    let c = accent(dark);
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
 }
 
 pub const BG_PRESETS: &[(&str, Option<u32>)] = &[

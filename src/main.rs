@@ -9,18 +9,23 @@ use std::rc::Rc;
 use std::time::Instant;
 use zip::ZipArchive;
 
+mod css;
 mod hilite;
 mod loaders;
 mod model;
 mod storage;
 mod style;
 
+use css::Sheet;
 use loaders::load as load_doc;
 use model::{Block, DocData, Document, Inline, Style, TocEntry};
 use storage::{Library, Note, Settings};
 use style::FontManager;
 
 const APP_TITLE: &str = "CrazyReader";
+/// The size the reader's own A+/A− control is centred on: a stylesheet that
+/// declares `font-size` is scaled by that control rather than ignoring it.
+const BASE_FONT_SIZE: f32 = 17.0;
 const ICON_RGBA: &[u8] = include_bytes!("../assets/icon_64.rgba");
 
 struct BookHandle {
@@ -76,6 +81,12 @@ struct AppState {
     sel_tools_pos: Option<egui::Pos2>,
     /// excerpt the note being written refers to
     note_quote: Option<String>,
+    /// parsed user stylesheet, applied to Markdown documents
+    css: Option<Rc<Sheet>>,
+    css_path: Option<PathBuf>,
+    /// mtime the stylesheet was last read at, so edits reload it
+    css_mtime: Option<std::time::SystemTime>,
+    css_check: Instant,
     /// filled by the [`SelectionProbe`] plugin, which is the only place the
     /// settled selection can still be read from
     sel_sink: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -89,9 +100,11 @@ impl ReaderApp {
     fn new(ctx: &egui::Context) -> Self {
         let (lib, config_file) = Library::load();
         let settings = lib.settings.clone();
+        let css_path = settings.css.as_ref().map(PathBuf::from);
         let mut fonts = FontManager::new();
+        let css = css_path.as_ref().and_then(|p| load_sheet(p));
         let font_key = fonts
-            .apply(ctx, &settings.font)
+            .apply(ctx, &settings.font, &sheet_fonts(css.as_ref()))
             .unwrap_or_else(|| settings.font.clone());
         let mut st = AppState {
             lib,
@@ -137,6 +150,10 @@ impl ReaderApp {
             selection: None,
             sel_tools_pos: None,
             note_quote: None,
+            css: css.map(Rc::new),
+            css_path,
+            css_mtime: None,
+            css_check: Instant::now(),
             sel_sink: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         if st.folder_open.is_empty() {
@@ -332,9 +349,41 @@ fn save_now(st: &mut AppState) {
             .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect(),
+        css: st
+            .css_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
     };
     Library::save(&st.lib, &st.config_file);
     st.last_save = Instant::now();
+}
+
+/// Read and parse the stylesheet at `path`; unreadable files are simply absent.
+fn load_sheet(path: &Path) -> Option<Sheet> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(css::parse(&text))
+}
+
+fn sheet_fonts(css: Option<&Sheet>) -> Vec<String> {
+    css.map(|s| s.fonts()).unwrap_or_default()
+}
+
+/// (Re)read the user stylesheet and install any face it names.
+fn reload_css(st: &mut AppState, ctx: &egui::Context) {
+    let sheet = st.css_path.as_deref().and_then(load_sheet);
+    st.css_mtime = st
+        .css_path
+        .as_deref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok());
+    let extras = sheet_fonts(sheet.as_ref());
+    st.css = sheet.map(Rc::new).filter(|s| !s.is_empty());
+    if let Some(k) = st.fonts.apply(ctx, &st.font_key, &extras) {
+        st.font_key = k;
+    }
+    // Glyph metrics change with a stylesheet, so every cached height is stale.
+    st.block_h.clear();
+    st.page_h.clear();
 }
 
 /// egui only publishes a settled label selection as a platform command, and the
@@ -398,6 +447,22 @@ impl eframe::App for ReaderApp {
         }
         if st.last_save.elapsed().as_secs() > 20 {
             save_now(st);
+        }
+        // A stylesheet is a text file the reader edits elsewhere, so pick up
+        // saves without a restart.
+        if st.css_check.elapsed().as_secs_f32() > 1.5 {
+            st.css_check = Instant::now();
+            let changed = st
+                .css_path
+                .as_deref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok())
+                .is_some_and(|t| Some(t) != st.css_mtime);
+            if changed {
+                reload_css(st, ctx);
+                st.status = "样式表已重新载入".to_string();
+                ctx.request_repaint();
+            }
         }
         // PDF keyboard paging
         let page_down =
@@ -470,7 +535,7 @@ impl eframe::App for ReaderApp {
         let st = &mut *self.st.borrow_mut();
         let ctx = ui.ctx().clone();
         build_style(&ctx, st.dark);
-        if let Some(k) = st.fonts.apply(&ctx, &st.font_key) {
+        if let Some(k) = st.fonts.apply(&ctx, &st.font_key, &sheet_fonts(st.css.as_deref())) {
             if k != st.font_key {
                 st.font_key = k;
             }
@@ -482,66 +547,207 @@ impl eframe::App for ReaderApp {
         let mut open_dir_clicked = false;
         let mut tab_click: Option<usize> = None;
         let mut tab_close: Option<usize> = None;
+        let mut t_toc = false;
+        let mut t_notes = false;
+        let mut t_tools = false;
         let cur = st.cur;
-        egui::Panel::top("topbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("打开文件 (Ctrl+O)").strong()).fill(ui.style().visuals.widgets.noninteractive.bg_fill)).clicked() {
-                    open_clicked = true;
-                }
-                if ui.add(egui::Button::new(RichText::new("打开目录").strong()).fill(ui.style().visuals.widgets.noninteractive.bg_fill)).clicked() {
-                    open_dir_clicked = true;
-                }
-                ui.separator();
-                if ui.selectable_label(st.show_toc, "侧栏").clicked() {
-                    st.show_toc = !st.show_toc;
-                }
-                if has_books && ui.selectable_label(st.show_notes, "笔记").clicked() {
-                    st.show_notes = !st.show_notes;
-                }
-                if has_books {
-                    let tools_open = st.sel_tools_pos.is_some();
-                    if ui
-                        .selectable_label(tools_open, "工具窗")
-                        .on_hover_text("选中文字的悬浮窗：标记 / 摘录 / 笔记 / 复制")
-                        .clicked()
+        let show_toc = st.show_toc;
+        let show_notes = st.show_notes;
+        let tools_open = st.sel_tools_pos.is_some();
+        egui::Panel::top("topbar")
+            .frame(
+                Frame::new()
+                    .fill(ui.style().visuals.panel_fill)
+                    .inner_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 5,
+                        bottom: 5,
+                    }),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if icon_button(ui, Icon::OpenFile, "打开文件", "打开电子书文件（Ctrl+O）", false)
                     {
-                        st.sel_tools_pos = if tools_open {
-                            None
-                        } else {
-                            let p = ctx
-                                .input(|i| i.pointer.interact_pos())
-                                .unwrap_or_else(|| ctx.viewport_rect().center());
-                            Some(clamp_tools(p, &ctx))
-                        };
+                        open_clicked = true;
                     }
-                }
-                if !st.status.is_empty() {
-                    ui.separator();
-                    ui.label(RichText::new(&st.status).weak().size(12.5));
-                }
-                if has_books {
-                    ui.separator();
-                    for (i, b) in st.books.iter().enumerate() {
-                        let title = shorten(&b.doc.title, 18);
-                        if i == cur {
-                            ui.colored_label(
-                                Color32::from_rgb(0x39, 0x55, 0xCF),
-                                RichText::new(format!("■ {title}")).strong(),
-                            );
-                        } else if ui.button(format!("□ {title}")).clicked() {
-                            tab_click = Some(i);
-                        }
-                        if ui
-                            .small_button("×")
-                            .on_hover_text("关闭此页签")
-                            .clicked()
+                    if icon_button(ui, Icon::OpenDir, "打开目录", "浏览一个文件夹（Ctrl+D）", false)
+                    {
+                        open_dir_clicked = true;
+                    }
+                    ui.add_space(4.0);
+                    group(ui, |ui| {
+                        if icon_button_at(ui, Icon::Panel, "侧栏", "显示或隐藏左侧栏", show_toc, true)
                         {
-                            tab_close = Some(i);
+                            t_toc = true;
                         }
+                        if has_books
+                            && icon_button_at(
+                                ui,
+                                Icon::Pen,
+                                "笔记",
+                                "显示或隐藏笔记面板",
+                                show_notes,
+                                true,
+                            )
+                        {
+                            t_notes = true;
+                        }
+                        if has_books
+                            && icon_button_at(
+                                ui,
+                                Icon::Tools,
+                                "工具窗",
+                                "选中文字的悬浮窗：标记 / 摘录 / 笔记 / 复制",
+                                tools_open,
+                                true,
+                            )
+                        {
+                            t_tools = true;
+                        }
+                    });
+                    if has_books {
+                        // The active tab is painted in the reading paper colour so it
+                        // looks like the top edge of the page it opens onto.
+                        let theme = style::reading_theme(st.bg);
+                        let page_fill = theme
+                            .map(|t| t.fill)
+                            .unwrap_or(ui.style().visuals.window_fill);
+                        let page_text = theme
+                            .map(|t| t.text)
+                            .unwrap_or_else(|| ui.visuals().text_color());
+                        let acc = accent(ui);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            for (i, b) in st.books.iter().enumerate().rev() {
+                                let title = shorten(&b.doc.title, 14);
+                                let active = i == cur;
+                                let kind = kind_of(&b.doc.path, false);
+                                let font = FontId::proportional(12.5);
+                                let tw = ui
+                                    .fonts_mut(|f| {
+                                        f.layout_no_wrap(title.clone(), font.clone(), Color32::WHITE)
+                                            .size()
+                                            .x
+                                    });
+                                let h = 26.0;
+                                let close_w = 18.0;
+                                // Right-to-left: the close box is allocated first so it
+                                // ends up on the right of the tab body.
+                                let (xr, xresp) = ui.allocate_exact_size(
+                                    Vec2::new(close_w, h),
+                                    egui::Sense::click(),
+                                );
+                                let (br, bresp) = ui.allocate_exact_size(
+                                    Vec2::new(10.0 + 15.0 + 6.0 + tw + 6.0, h),
+                                    egui::Sense::click(),
+                                );
+                                let tab = br.union(xr);
+                                let hovered = bresp.hovered() || xresp.hovered();
+                                let fill = if active {
+                                    page_fill
+                                } else if hovered {
+                                    ui.style().visuals.faint_bg_color
+                                } else {
+                                    Color32::TRANSPARENT
+                                };
+                                ui.painter().rect(
+                                    tab,
+                                    egui::CornerRadius::from(7.0),
+                                    fill,
+                                    egui::Stroke::NONE,
+                                    egui::StrokeKind::Inside,
+                                );
+                                if active {
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_max(
+                                            tab.min,
+                                            egui::pos2(tab.max.x, tab.min.y + 2.5),
+                                        ),
+                                        egui::CornerRadius {
+                                            nw: 7,
+                                            ne: 7,
+                                            sw: 0,
+                                            se: 0,
+                                        },
+                                        acc,
+                                    );
+                                }
+                                ui.painter().rect_stroke(
+                                    tab,
+                                    7.0,
+                                    ui.style().visuals.widgets.noninteractive.bg_stroke,
+                                    egui::StrokeKind::Inside,
+                                );
+                                let fg = if active {
+                                    page_text
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+                                kind_icon_at(
+                                    ui.painter(),
+                                    egui::Rect::from_min_size(
+                                        egui::pos2(br.min.x + 8.0, br.center().y - 7.5),
+                                        Vec2::splat(15.0),
+                                    ),
+                                    &kind,
+                                );
+                                ui.painter().text(
+                                    egui::pos2(br.min.x + 29.0, br.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    &title,
+                                    font,
+                                    fg,
+                                );
+                                if xresp.hovered() {
+                                    ui.painter().circle_filled(
+                                        xr.center(),
+                                        8.0,
+                                        style::accent_soft(ui.visuals().dark_mode, 60),
+                                    );
+                                }
+                                Icon::Close.paint(
+                                    ui.painter(),
+                                    egui::Rect::from_min_size(
+                                        xr.center() - egui::vec2(5.0, 5.0),
+                                        Vec2::splat(10.0),
+                                    ),
+                                    if active || hovered {
+                                        fg
+                                    } else {
+                                        ui.visuals().weak_text_color()
+                                    },
+                                    fill,
+                                );
+                                bresp.clone().on_hover_text(&b.doc.title);
+                                xresp.clone().on_hover_text("关闭此页签");
+                                if bresp.clicked() && !active {
+                                    tab_click = Some(i);
+                                }
+                                if xresp.clicked() {
+                                    tab_close = Some(i);
+                                }
+                                ui.add_space(6.0);
+                            }
+                        });
                     }
-                }
+                });
             });
-        });
+        if t_toc {
+            st.show_toc = !st.show_toc;
+        }
+        if t_notes {
+            st.show_notes = !st.show_notes;
+        }
+        if t_tools {
+            st.sel_tools_pos = if st.sel_tools_pos.is_some() {
+                None
+            } else {
+                let p = ctx
+                    .input(|i| i.pointer.interact_pos())
+                    .unwrap_or_else(|| ctx.viewport_rect().center());
+                Some(clamp_tools(p, &ctx))
+            };
+        }
         if open_clicked {
             let files = rfd::FileDialog::new()
                 .add_filter("电子书", &["epub", "md", "markdown", "pdf", "txt", "text"])
@@ -606,9 +812,7 @@ impl eframe::App for ReaderApp {
                 .max_size(480.0)
                 .show(ui, |ui| {
                     folder_section(ui, folder.as_ref(), &mut tree_cache, &mut tree_open, &mut ev);
-                    ui.separator();
-                    ui.strong("章节目录");
-                    ui.separator();
+                    panel_header(ui, "章节目录", 0.0, |_| {});
                     ScrollArea::vertical()
                         .id_salt("toc")
                         .auto_shrink([false, false])
@@ -616,19 +820,22 @@ impl eframe::App for ReaderApp {
                             if doc.toc.is_empty() {
                                 ui.label(RichText::new("（此文档没有目录）").weak());
                             }
-                            for e in doc.toc.iter() {
+                            // Several entries can share a page; the one being read is
+                            // the last of them, not all of them.
+                            let active = doc.toc.iter().rposition(|e| e.page <= page);
+                            for (idx, e) in doc.toc.iter().enumerate() {
                                 let indent = (e.depth as f32) * 12.0;
                                 ui.add_space(1.0);
                                 ui.horizontal(|ui| {
                                     ui.add_space(indent);
-                                    let is_cur = e.page == page;
+                                    let is_cur = active == Some(idx);
                                     let rt = RichText::new(shorten(&e.title, 30)).size(13.5);
                                     let rt = if is_cur {
-                                        rt.color(Color32::from_rgb(0x39, 0x55, 0xCF)).strong()
+                                        rt.color(accent(ui)).strong()
                                     } else {
                                         rt
                                     };
-                                    if list_row(ui, rt, 22.0) {
+                                    if list_row_sel(ui, rt, 22.0, is_cur) {
                                         jump = Some(e.clone());
                                     }
                                 });
@@ -683,8 +890,7 @@ impl eframe::App for ReaderApp {
                 .min_size(200.0)
                 .max_size(480.0)
                 .show(ui, |ui| {
-                    ui.strong("笔记");
-                    ui.separator();
+                    panel_header(ui, "笔记", 0.0, |_| {});
                     ui.label(RichText::new(format!("当前：第 {} / {total} 页", page + 1)).size(12.5).weak());
                     if let Some(q) = st.note_quote.clone() {
                         Frame::new()
@@ -695,7 +901,14 @@ impl eframe::App for ReaderApp {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("引用").size(11.0).weak());
                                     ui.label(RichText::new(shorten(&q, 60)).size(12.0).italics());
-                                    if ui.small_button("取消").clicked() {
+                                    if icon_button_at(
+                                        ui,
+                                        Icon::Close,
+                                        "",
+                                        "取消引用",
+                                        false,
+                                        true,
+                                    ) {
                                         cancel_quote = true;
                                     }
                                 });
@@ -709,10 +922,10 @@ impl eframe::App for ReaderApp {
                             .desired_width(f32::INFINITY),
                     );
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(RichText::new("添加笔记").strong())).clicked() {
+                        if icon_button(ui, Icon::Plus, "添加笔记", "把输入框里的内容存为一条笔记", false) {
                             add_clicked = true;
                         }
-                        if ui.button("清空").clicked() {
+                        if icon_button_at(ui, Icon::Trash, "清空", "清空输入框", false, true) {
                             clear_clicked = true;
                         }
                     });
@@ -721,20 +934,45 @@ impl eframe::App for ReaderApp {
                     // areas overflow a short window: once the last one was left with zero
                     // height, egui laid its content out at unbounded width and the whole
                     // panel slid off the right edge of the screen.
+                    let card_fill = ui.style().visuals.faint_bg_color;
                     ScrollArea::vertical()
                         .id_salt("notes_body")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            section_head(ui, "笔记", note_list.len());
                             if note_list.is_empty() {
-                                ui.label(RichText::new("（暂无笔记）").weak());
+                                ui.label(RichText::new("（暂无笔记）").weak().size(12.5));
                             }
                             for n in note_list.iter().rev() {
-                                Frame::new()
-                                    .fill(ui.style().visuals.faint_bg_color)
-                                    .corner_radius(6.0)
-                                    .inner_margin(10.0)
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new(&n.text).size(13.5));
+                                card(ui, card_fill, |ui| {
+                                    ui.label(RichText::new(&n.text).size(13.5));
+                                    ui.horizontal(|ui| {
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                if icon_button_at(
+                                                    ui,
+                                                    Icon::Jump,
+                                                    "",
+                                                    "跳到原文位置",
+                                                    false,
+                                                    true,
+                                                ) {
+                                                    jump_note =
+                                                        Some(n.page.min(total.saturating_sub(1)));
+                                                }
+                                                if icon_button_at(
+                                                    ui,
+                                                    Icon::Trash,
+                                                    "",
+                                                    "删除",
+                                                    false,
+                                                    true,
+                                                ) {
+                                                    delete_note = Some(n.id);
+                                                }
+                                            },
+                                        );
                                         ui.label(
                                             RichText::new(format!(
                                                 "第 {} 页 · {}",
@@ -744,19 +982,12 @@ impl eframe::App for ReaderApp {
                                             .size(11.0)
                                             .weak(),
                                         );
-                                        ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
-                                            if ui.small_button("删除").clicked() {
-                                                delete_note = Some(n.id);
-                                            }
-                                            if ui.small_button("跳转").clicked() {
-                                                jump_note = Some(n.page.min(total.saturating_sub(1)));
-                                            }
-                                        });
                                     });
+                                });
                                 ui.add_space(6.0);
                             }
-                            ui.separator();
-                            ui.strong(format!("摘录 ({})", excerpts.len()));
+                            ui.add_space(6.0);
+                            section_head(ui, "摘录", excerpts.len());
                             ui.label(
                                 RichText::new("用悬浮工具窗的「摘录」保存选中的原文")
                                     .size(11.5)
@@ -764,16 +995,39 @@ impl eframe::App for ReaderApp {
                             );
                             ui.add_space(4.0);
                             if excerpts.is_empty() {
-                                ui.label(RichText::new("（暂无摘录）").weak());
+                                ui.label(RichText::new("（暂无摘录）").weak().size(12.5));
                             }
                             for n in excerpts.iter().rev() {
                                 let Some(q) = n.quote.as_deref() else { continue };
-                                Frame::new()
-                                    .fill(ui.style().visuals.faint_bg_color)
-                                    .corner_radius(6.0)
-                                    .inner_margin(8.0)
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new(q).size(12.5).italics());
+                                card(ui, card_fill, |ui| {
+                                    ui.label(RichText::new(q).size(12.5).italics());
+                                    ui.horizontal(|ui| {
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                if icon_button_at(
+                                                    ui,
+                                                    Icon::Jump,
+                                                    "",
+                                                    "跳到原文位置",
+                                                    false,
+                                                    true,
+                                                ) {
+                                                    jump_note =
+                                                        Some(n.page.min(total.saturating_sub(1)));
+                                                }
+                                                if icon_button_at(
+                                                    ui,
+                                                    Icon::Trash,
+                                                    "",
+                                                    "删除",
+                                                    false,
+                                                    true,
+                                                ) {
+                                                    delete_note = Some(n.id);
+                                                }
+                                            },
+                                        );
                                         ui.label(
                                             RichText::new(format!(
                                                 "第 {} 页 · {}",
@@ -783,19 +1037,12 @@ impl eframe::App for ReaderApp {
                                             .size(11.0)
                                             .weak(),
                                         );
-                                        ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
-                                            if ui.small_button("删除").clicked() {
-                                                delete_note = Some(n.id);
-                                            }
-                                            if ui.small_button("跳转").clicked() {
-                                                jump_note = Some(n.page.min(total.saturating_sub(1)));
-                                            }
-                                        });
                                     });
-                                ui.add_space(5.0);
+                                });
+                                ui.add_space(6.0);
                             }
-                            ui.separator();
-                            ui.strong("标记");
+                            ui.add_space(6.0);
+                            section_head(ui, "标记", marks.len());
                             ui.label(
                                 RichText::new("选中文字后，用悬浮工具窗或阅读区底部的「标记」")
                                     .size(11.5)
@@ -803,25 +1050,25 @@ impl eframe::App for ReaderApp {
                             );
                             ui.add_space(4.0);
                             if marks.is_empty() {
-                                ui.label(RichText::new("（暂无标记）").weak());
+                                ui.label(RichText::new("（暂无标记）").weak().size(12.5));
                             }
                             for (i, m) in marks.iter().enumerate().rev() {
-                                Frame::new()
-                                    .fill(mark_bg)
-                                    .corner_radius(4.0)
-                                    .inner_margin(8.0)
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new(m).size(12.5));
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Max),
-                                            |ui| {
-                                                if ui.small_button("删除").clicked() {
-                                                    delete_mark = Some(i);
-                                                }
-                                            },
-                                        );
+                                card(ui, mark_bg, |ui| {
+                                    ui.label(RichText::new(m).size(12.5));
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if icon_button_at(
+                                            ui,
+                                            Icon::Trash,
+                                            "",
+                                            "删除标记",
+                                            false,
+                                            true,
+                                        ) {
+                                            delete_mark = Some(i);
+                                        }
                                     });
-                                ui.add_space(5.0);
+                                });
+                                ui.add_space(6.0);
                             }
                         });
                 });
@@ -897,107 +1144,208 @@ impl eframe::App for ReaderApp {
         let mut new_bg: Option<Option<u32>> = None;
         let sel_now = st.selection.clone();
         let mut mark_clicked = false;
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{} · 第 {} / {total} 页 · {:.0}%",
-                    doc.format.label(),
-                    page_now + 1,
-                    (page_now + 1) as f32 * 100.0 / total.max(1) as f32
-                ));
-                ui.separator();
-                if ui.button("A−").clicked() {
-                    font_minus = true;
-                }
-                ui.label(format!("{:.0}", st_font));
-                if ui.button("A+").clicked() {
-                    font_plus = true;
-                }
-                if matches!(doc.format, model::Format::Pdf) {
-                    ui.separator();
-                    if ui.button("−").clicked() {
-                        zoom_minus = true;
-                    }
-                    ui.label(format!("缩放 {:.0}%", st_zoom * 100.0));
-                    if ui.button("+").clicked() {
-                        zoom_plus = true;
-                    }
-                }
-                ui.separator();
-                if ui.selectable_label(!st_double, "单页").clicked() {
-                    set_single = true;
-                }
-                if ui.selectable_label(st_double, "双页").clicked() {
-                    set_double = true;
-                }
-                ui.separator();
-                if ui.button(if st_dark { "深色主题" } else { "浅色主题" }).clicked() {
-                    theme_toggle = true;
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        sel_now.is_some(),
-                        egui::Button::new(RichText::new("标记").weak()),
-                    )
-                    .on_hover_text("为选中的文字加上背景色（Ctrl+M）")
-                    .clicked()
-                {
-                    mark_clicked = true;
-                }
-                ui.separator();
-                ui.label(RichText::new("字体").size(12.5).weak());
-                egui::ComboBox::from_id_salt("readfont")
-                    .selected_text(font_label)
-                    .show_ui(ui, |ui| {
-                        if font_items.is_empty() {
-                            ui.label(RichText::new("（未找到中文字体）").weak());
+        let css_now = st.css_path.clone();
+        let css_label = css_now
+            .as_ref()
+            .and_then(|p| {
+                p.file_name()
+                    .map(|n| shorten(&n.to_string_lossy(), 18))
+            })
+            .unwrap_or_else(|| "无（内置样式）".to_string());
+        let mut css_pick = false;
+        let mut css_clear = false;
+        let mut css_reload = false;
+        egui::Panel::bottom("status")
+            .frame(
+                Frame::new()
+                    .fill(ui.style().visuals.panel_fill)
+                    .inner_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 5,
+                        bottom: 5,
+                    }),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · 第 {} / {total} 页 · {:.0}%",
+                            doc.format.label(),
+                            page_now + 1,
+                            (page_now + 1) as f32 * 100.0 / total.max(1) as f32
+                        ))
+                        .size(12.5)
+                        .strong(),
+                    );
+                    ui.add_space(4.0);
+                    group(ui, |ui| {
+                        if ui.button("A−").on_hover_text("减小字号").clicked() {
+                            font_minus = true;
                         }
-                        for (k, l) in &font_items {
-                            if ui
-                                .selectable_label(k == &font_key_now, RichText::new(l).size(13.5))
-                                .clicked()
-                            {
-                                new_font = Some(k.clone());
+                        ui.label(RichText::new(format!("{:.0}", st_font)).size(12.5));
+                        if ui.button("A+").on_hover_text("增大字号").clicked() {
+                            font_plus = true;
+                        }
+                        if matches!(doc.format, model::Format::Pdf) {
+                            ui.separator();
+                            if ui.button("−").clicked() {
+                                zoom_minus = true;
+                            }
+                            ui.label(format!("缩放 {:.0}%", st_zoom * 100.0));
+                            if ui.button("+").clicked() {
+                                zoom_plus = true;
                             }
                         }
                     });
-                ui.label(RichText::new("背景").size(12.5).weak());
-                egui::ComboBox::from_id_salt("readbg")
-                    .selected_text(bg_label)
-                    .width(150.0)
-                    .show_ui(ui, |ui| {
-                        for (name, v) in style::BG_PRESETS {
-                            let sel = *v == bg_now;
-                            let sw = swatch_color(*v);
-                            if ui
-                                .selectable_label(
-                                    sel,
-                                    RichText::new(format!("■ {name}")).color(sw).size(13.5),
-                                )
-                                .clicked()
-                            {
-                                new_bg = Some(*v);
-                            }
+                    group(ui, |ui| {
+                        if icon_button_at(ui, Icon::PageSingle, "单页", "单栏阅读", !st_double, true)
+                        {
+                            set_single = true;
+                        }
+                        if icon_button_at(ui, Icon::PageDouble, "双页", "双栏阅读", st_double, true)
+                        {
+                            set_double = true;
                         }
                         ui.separator();
-                        let mut custom = packed_color(bg_now.unwrap_or(0xF9F6EE));
-                        if ui
-                            .horizontal(|ui| {
-                                ui.label(RichText::new("自定义").size(13.5));
-                                egui::color_picker::color_picker_color32(
-                                    ui,
-                                    &mut custom,
-                                    egui::color_picker::Alpha::Opaque,
-                                )
-                            })
-                            .inner
-                        {
-                            new_bg = Some(Some(packed_of(custom)));
+                        if icon_button_at(
+                            ui,
+                            if st_dark { Icon::Sun } else { Icon::Moon },
+                            if st_dark { "浅色主题" } else { "深色主题" },
+                            "切换浅色 / 深色主题",
+                            false,
+                            true,
+                        ) {
+                            theme_toggle = true;
+                        }
+                        ui.separator();
+                        ui.add_enabled_ui(sel_now.is_some(), |ui| {
+                            if icon_button_at(
+                                ui,
+                                Icon::Mark,
+                                "标记",
+                                "为选中的文字加上背景色（Ctrl+M）",
+                                false,
+                                true,
+                            ) {
+                                mark_clicked = true;
+                            }
+                        });
+                    });
+                    group(ui, |ui| {
+                        ui.label(RichText::new("字体").size(12.5).weak());
+                        egui::ComboBox::from_id_salt("readfont")
+                            .selected_text(font_label)
+                            .show_ui(ui, |ui| {
+                                if font_items.is_empty() {
+                                    ui.label(RichText::new("（未找到中文字体）").weak());
+                                }
+                                for (k, l) in &font_items {
+                                    if ui
+                                        .selectable_label(
+                                            k == &font_key_now,
+                                            RichText::new(l).size(13.5),
+                                        )
+                                        .clicked()
+                                    {
+                                        new_font = Some(k.clone());
+                                    }
+                                }
+                            });
+                        ui.label(RichText::new("背景").size(12.5).weak());
+                        egui::ComboBox::from_id_salt("readbg")
+                            .selected_text(bg_label)
+                            .width(150.0)
+                            .show_ui(ui, |ui| {
+                                for (name, v) in style::BG_PRESETS {
+                                    let sel = *v == bg_now;
+                                    let sw = swatch_color(*v);
+                                    if ui
+                                        .selectable_label(
+                                            sel,
+                                            RichText::new(format!("■ {name}"))
+                                                .color(sw)
+                                                .size(13.5),
+                                        )
+                                        .clicked()
+                                    {
+                                        new_bg = Some(*v);
+                                    }
+                                }
+                                ui.separator();
+                                let mut custom = packed_color(bg_now.unwrap_or(0xF9F6EE));
+                                if ui
+                                    .horizontal(|ui| {
+                                        ui.label(RichText::new("自定义").size(13.5));
+                                        egui::color_picker::color_picker_color32(
+                                            ui,
+                                            &mut custom,
+                                            egui::color_picker::Alpha::Opaque,
+                                        )
+                                    })
+                                    .inner
+                                {
+                                    new_bg = Some(Some(packed_of(custom)));
+                                }
+                            });
+                        if matches!(doc.format, model::Format::Markdown) {
+                            ui.label(RichText::new("样式").size(12.5).weak());
+                            egui::ComboBox::from_id_salt("readcss")
+                                .selected_text(css_label)
+                                .width(150.0)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(
+                                            css_now.is_none(),
+                                            RichText::new("无（内置样式）").size(13.5),
+                                        )
+                                        .clicked()
+                                    {
+                                        css_clear = true;
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            false,
+                                            RichText::new("选择 CSS 文件…").size(13.5),
+                                        )
+                                        .clicked()
+                                    {
+                                        css_pick = true;
+                                    }
+                                    if css_now.is_some() {
+                                        if ui
+                                            .selectable_label(
+                                                false,
+                                                RichText::new("重新载入").size(13.5),
+                                            )
+                                            .clicked()
+                                        {
+                                            css_reload = true;
+                                        }
+                                        if let Some(s) = st.css.as_deref() {
+                                            for e in s.errors.iter().take(4) {
+                                                ui.label(
+                                                    RichText::new(e)
+                                                        .size(11.5)
+                                                        .color(Color32::from_rgb(0xC0, 0x30, 0x3C)),
+                                                );
+                                            }
+                                        }
+                                    }
+                                });
                         }
                     });
+                    // Status lives here, not in the top bar: the top bar is for
+                    // navigation, and a transient message should not shift the tabs.
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if !st.status.is_empty() {
+                            ui.add(
+                                Label::new(RichText::new(&st.status).weak().size(12.0)).truncate(),
+                            );
+                        }
+                    });
+                });
             });
-        });
         if mark_clicked {
             apply_mark(st);
             ui.ctx().request_repaint();
@@ -1017,6 +1365,35 @@ impl eframe::App for ReaderApp {
                 save_now(st);
                 ui.ctx().request_repaint();
             }
+        }
+        if css_pick {
+            if let Some(file) = rfd::FileDialog::new()
+                .add_filter("CSS 样式表", &["css"])
+                .pick_file()
+            {
+                st.css_path = Some(file.clone());
+                reload_css(st, &ctx);
+                save_now(st);
+                st.status = match &file.file_name() {
+                    Some(n) => format!("已应用样式表 {}", n.to_string_lossy()),
+                    None => "已应用样式表".to_string(),
+                };
+                ui.ctx().request_repaint();
+            }
+        }
+        if css_clear {
+            st.css_path = None;
+            st.css = None;
+            st.css_mtime = None;
+            st.status = "已改用内置样式".to_string();
+            save_now(st);
+            ui.ctx().request_repaint();
+        }
+        if css_reload {
+            reload_css(st, &ctx);
+            st.status = "样式表已重新载入".to_string();
+            save_now(st);
+            ui.ctx().request_repaint();
         }
         if font_minus {
             st.font_size = (st.font_size - 1.0).max(11.0);
@@ -1056,12 +1433,28 @@ impl eframe::App for ReaderApp {
         let bg = st.bg;
         let marks = current_marks(st);
         let mark_bg = mark_color(st.dark);
+        // Only Markdown takes a stylesheet; the other formats bring their own
+        // layout and would only be distorted by it.
+        let css = if matches!(doc.format, model::Format::Markdown) {
+            st.css.clone()
+        } else {
+            None
+        };
+        let scale = st.font_size / BASE_FONT_SIZE;
+        let body = css
+            .as_ref()
+            .and_then(|s| s.own("body").font_size)
+            .map(|l| l.px(BASE_FONT_SIZE, 0.0))
+            .unwrap_or(BASE_FONT_SIZE);
         let mut c = Ctx {
             st,
             doc: &doc,
             zoom: st_zoom,
             marks,
             mark_bg,
+            css,
+            body,
+            scale,
         };
         let mut area = ScrollArea::vertical()
             .id_salt(("read", c.st.cur))
@@ -1144,6 +1537,117 @@ struct Ctx<'a> {
     /// Excerpt strings the reader marked in the current book.
     marks: Vec<String>,
     mark_bg: Color32,
+    /// User stylesheet, only set for Markdown documents.
+    css: Option<Rc<Sheet>>,
+    /// `body { font-size }` as authored, before the reader's own zoom.
+    body: f32,
+    /// The reader's A+/A− control expressed as a multiplier.
+    scale: f32,
+}
+
+/// How one block should look once the stylesheet has been applied.
+#[derive(Clone)]
+struct Fmt {
+    size: f32,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    color: Option<Color32>,
+    bg: Option<Color32>,
+    line_h: Option<f32>,
+    family: Option<egui::FontFamily>,
+    align: Option<Align>,
+    indent: f32,
+    before: f32,
+    after: f32,
+    pad: Option<[f32; 4]>,
+    border: Option<(f32, Color32)>,
+}
+
+impl Ctx<'_> {
+    /// Resolve the look of `sel`, falling back to the reader's own defaults.
+    ///
+    /// `before`/`after` are the spacing the reader uses when the sheet stays
+    /// silent about margins, so a stylesheet can override either side alone.
+    fn style(&self, sel: &str, size: f32, bold: bool, before: f32, after: f32, ref_w: f32) -> Fmt {
+        let mut f = Fmt {
+            size,
+            bold,
+            italic: false,
+            underline: false,
+            strike: false,
+            color: None,
+            bg: None,
+            line_h: None,
+            family: None,
+            align: None,
+            indent: 0.0,
+            before,
+            after,
+            pad: None,
+            border: None,
+        };
+        let Some(sheet) = self.css.as_deref() else {
+            return f;
+        };
+        let own = sheet.own(sel);
+        let inh = sheet.rule(&[sel]);
+        if let Some(l) = own.font_size {
+            f.size = l.px(self.body, self.body) * self.scale;
+        }
+        if let Some(b) = own.bold {
+            f.bold = b;
+        }
+        f.italic = inh.italic.unwrap_or(false);
+        f.underline = inh.underline.unwrap_or(false);
+        f.strike = inh.strike.unwrap_or(false);
+        f.color = inh.color;
+        f.bg = own.background;
+        if let Some(l) = inh.line_height {
+            f.line_h = Some(l.px(f.size, f.size).clamp(f.size, f.size * 4.0));
+        }
+        f.align = own.text_align.map(|a| match a {
+            css::TextAlign::Center => Align::Center,
+            css::TextAlign::Right => Align::Max,
+            css::TextAlign::Left => Align::Min,
+        });
+        f.indent = own.text_indent.map(|l| l.px(f.size, ref_w)).unwrap_or(0.0);
+        f.before = own.margin_top.map(|l| l.px(f.size, ref_w)).unwrap_or(before);
+        f.after = own
+            .margin_bottom
+            .map(|l| l.px(f.size, ref_w))
+            .unwrap_or(after);
+        f.pad = own.padding.map(|p| {
+            [
+                p[0].px(f.size, ref_w),
+                p[1].px(f.size, ref_w),
+                p[2].px(f.size, ref_w),
+                p[3].px(f.size, ref_w),
+            ]
+        });
+        f.border = own.border_left.map(|(w, c)| (w * self.scale, c));
+        f.family = inh.font_family.as_deref().and_then(|name| {
+            let key = css::font_key(name)?;
+            if key == "mono" {
+                Some(egui::FontFamily::Monospace)
+            } else if self.st.fonts.has(key) {
+                Some(egui::FontFamily::Name(key.into()))
+            } else {
+                None
+            }
+        });
+        f
+    }
+
+    /// Inline code and `<pre>` blocks want a monospace face unless the sheet says
+    /// otherwise.
+    fn mono(&self, mut f: Fmt) -> Fmt {
+        if self.css.is_some() {
+            f.family = Some(egui::FontFamily::Monospace);
+        }
+        f
+    }
 }
 
 fn current_marks(st: &AppState) -> Vec<String> {
@@ -1168,11 +1672,9 @@ fn clamp_tools(pos: egui::Pos2, ctx: &egui::Context) -> egui::Pos2 {
     )
 }
 
-/// The floating selection toolbar: 标记 / 摘录 / 笔记 / 复制.
-///
-/// It opens where the drag ended, moves by its header and closes with the ×
-/// button; the next selection brings it back. The glyph is U+00D7 — CJK
-/// reading fonts have it but not U+2715, which renders as a box.
+/// The floating selection toolbar: 标记 / 摘录 / 笔记 / 复制, all on one row
+/// with the close button at the right end. It opens where the drag ended and
+/// moves by its header; the next selection brings it back.
 fn selection_tools(st: &mut AppState, ctx: &egui::Context) {
     let Some(pos) = st.sel_tools_pos else {
         return;
@@ -1193,9 +1695,16 @@ fn selection_tools(st: &mut AppState, ctx: &egui::Context) {
                 .fill(fill)
                 .stroke(stroke)
                 .corner_radius(8.0)
-                .inner_margin(8.0)
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 5],
+                    blur: 16,
+                    spread: 0,
+                    color: Color32::from_black_alpha(28),
+                })
+                .inner_margin(egui::Margin::symmetric(8, 5))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
                         let head = ui.add(
                             Label::new(
                                 RichText::new(format!(
@@ -1212,28 +1721,36 @@ fn selection_tools(st: &mut AppState, ctx: &egui::Context) {
                         }
                         head.on_hover_text("按住此处可拖动悬浮窗");
                         ui.separator();
-                        if ui
-                            .small_button("×")
-                            .on_hover_text("关闭悬浮窗（重新选中文字会再次出现）")
-                            .clicked()
-                        {
-                            close = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        for (label, key, tip) in [
-                            ("标记", "mark", "为选中的文字加上背景色（Ctrl+M）"),
-                            ("摘录", "quote", "把选中的原文存入摘录列表"),
-                            ("笔记", "note", "针对选中的文字写笔记"),
-                            ("复制", "copy", "复制选中的文字到剪贴板"),
+                        for (icon, label, key, tip) in [
+                            (
+                                Icon::Mark,
+                                "标记",
+                                "mark",
+                                "为选中的文字加上背景色（Ctrl+M）",
+                            ),
+                            (Icon::Quote, "摘录", "quote", "把选中的原文存入摘录列表"),
+                            (Icon::Pen, "笔记", "note", "针对选中的文字写笔记"),
+                            (Icon::Copy, "复制", "copy", "复制选中的文字到剪贴板"),
                         ] {
-                            let b = ui.add_enabled(
-                                sel.is_some(),
-                                egui::Button::new(RichText::new(label).size(13.0)),
-                            );
-                            if b.on_hover_text(tip).clicked() {
+                            let hit = ui
+                                .add_enabled_ui(sel.is_some(), |ui| {
+                                    icon_button_at(ui, icon, label, tip, false, true)
+                                })
+                                .inner;
+                            if hit {
                                 act = Some(key);
                             }
+                        }
+                        ui.separator();
+                        if icon_button_at(
+                            ui,
+                            Icon::Close,
+                            "",
+                            "关闭悬浮窗（重新选中文字会再次出现）",
+                            false,
+                            true,
+                        ) {
+                            close = true;
                         }
                     });
                 });
@@ -1467,16 +1984,18 @@ fn folder_section(
     open: &mut HashSet<PathBuf>,
     ev: &mut FolderEv,
 ) {
-    ui.label(RichText::new("文件夹").strong());
+    let title = match folder {
+        Some(r) => r.display().to_string(),
+        None => "文件夹".to_string(),
+    };
+    panel_header(ui, &title, 56.0, |ui| {
+        if folder.is_some()
+            && icon_button_at(ui, Icon::Refresh, "刷新", "重新读取目录", false, true)
+        {
+            ev.refresh = true;
+        }
+    });
     if let Some(root) = folder {
-        ui.horizontal(|ui| {
-            if ui.small_button("刷新").on_hover_text("重新读取目录").clicked() {
-                ev.refresh = true;
-            }
-        });
-        ui.add_space(2.0);
-        ui.label(RichText::new(shorten(&root.display().to_string(), 40)).size(11.0).weak());
-        ui.separator();
         ScrollArea::vertical()
             .id_salt("folder")
             .auto_shrink([false, true])
@@ -1488,7 +2007,6 @@ fn folder_section(
                 }
             });
         ui.add_space(8.0);
-        ui.separator();
     }
 }
 
@@ -1548,7 +2066,14 @@ fn shade(c: Color32, k: f32) -> Color32 {
 /// Returns `true` when clicked, since the icon belongs to the row's hit area.
 fn kind_icon(ui: &mut egui::Ui, kind: &Kind) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::click());
-    let p = ui.painter_at(rect.shrink(1.0));
+    kind_icon_at(&ui.painter_at(rect.shrink(1.0)), rect.shrink(1.0), kind);
+    let clicked = resp.clicked();
+    resp.on_hover_text(kind.label());
+    clicked
+}
+
+/// Same glyph as [`kind_icon`], painted into a caller-owned rect (page tabs).
+fn kind_icon_at(p: &egui::Painter, rect: egui::Rect, kind: &Kind) {
     let mid = egui::StrokeKind::Middle;
     match kind {
         Kind::Folder => {
@@ -1605,9 +2130,6 @@ fn kind_icon(ui: &mut egui::Ui, kind: &Kind) -> bool {
             );
         }
     }
-    let clicked = resp.clicked();
-    resp.on_hover_text(kind.label());
-    clicked
 }
 
 /// One row of the folder tree. Returns nothing but records the click in `ev`.
@@ -1702,9 +2224,35 @@ fn folder_tree(
 
 /// Left-aligned list row. `Ui::add_sized` centres its content, so reserve the
 /// full width with a left-to-right layout instead.
+///
+/// The highlight is painted from `rect_contains_pointer` before the label,
+/// because egui draws shapes in submission order and the row's own `Response`
+/// only exists after the text has already been painted.
 fn list_row(ui: &mut egui::Ui, rt: RichText, h: f32) -> bool {
-    let size = Vec2::new(ui.available_width(), h);
-    ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+    list_row_sel(ui, rt, h, false)
+}
+
+fn list_row_sel(ui: &mut egui::Ui, rt: RichText, h: f32, selected: bool) -> bool {
+    let w = ui.available_width().max(60.0);
+    let rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(w, h));
+    if selected {
+        let a = accent(ui);
+        ui.painter()
+            .rect_filled(rect.shrink(1.0), 6.0, a.linear_multiply(0.22));
+        let line = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x + 1.0, rect.min.y + 4.0),
+            egui::pos2(rect.min.x + 3.5, rect.max.y - 4.0),
+        );
+        ui.painter().rect_filled(line, 1.5, a);
+    } else if ui.rect_contains_pointer(rect) {
+        ui.painter().rect_filled(
+            rect.shrink(1.0),
+            6.0,
+            ui.style().visuals.faint_bg_color,
+        );
+    }
+    ui.allocate_ui_with_layout(Vec2::new(w, h), Layout::left_to_right(Align::Center), |ui| {
+        ui.add_space(if selected { 6.0 } else { 2.0 });
         ui.add(Label::new(rt).selectable(false).sense(egui::Sense::click()))
             .clicked()
     })
@@ -1914,63 +2462,98 @@ fn render_block(
     font_size: f32,
     zoom: f32,
 ) {
+    let ref_w = ui.available_width();
     match block {
         Block::Heading { level, inlines, .. } => {
+            let sel = match level {
+                1 => "h1",
+                2 => "h2",
+                3 => "h3",
+                4 => "h4",
+                5 => "h5",
+                _ => "h6",
+            };
             let size = match level {
                 1 => font_size * 1.7,
                 2 => font_size * 1.4,
                 3 => font_size * 1.2,
                 _ => font_size * 1.08,
             };
-            ui.add_space(10.0);
-            render_inlines(ui, inlines, size, &c.marks, c.mark_bg, true);
-            ui.add_space(6.0);
+            let f = c.style(sel, size, true, 10.0, 6.0, ref_w);
+            ui.add_space(f.before);
+            show_block_frame(c, ui, &f, |ui| {
+                render_inlines(ui, inlines, &f, &c.marks, c.mark_bg);
+            });
+            ui.add_space(f.after);
         }
         Block::Para { inlines } => {
-            render_inlines(ui, inlines, font_size, &c.marks, c.mark_bg, false);
-            ui.add_space(8.0);
+            let f = c.style("p", font_size, false, 0.0, 8.0, ref_w);
+            ui.add_space(f.before);
+            if f.indent != 0.0 {
+                ui.indent("css-indent", |ui| ui.add_space(f.indent));
+            }
+            show_block_frame(c, ui, &f, |ui| {
+                render_inlines(ui, inlines, &f, &c.marks, c.mark_bg);
+            });
+            ui.add_space(f.after);
         }
         Block::ListItem { inlines, bullet } => {
+            let f = c.style("li", font_size, false, 0.0, 2.0, ref_w);
             ui.horizontal_wrapped(|ui| {
+                if f.indent != 0.0 {
+                    ui.add_space(f.indent);
+                }
                 let prefix = if *bullet { "• " } else { "‣ " };
-                ui.label(RichText::new(prefix).size(font_size));
-                render_inlines(ui, inlines, font_size, &c.marks, c.mark_bg, false);
+                ui.label(RichText::new(prefix).size(f.size));
+                render_inlines(ui, inlines, &f, &c.marks, c.mark_bg);
             });
-            ui.add_space(2.0);
+            ui.add_space(f.after);
         }
         Block::Quote { inlines } => {
-            Frame::new()
-                .fill(ui.style().visuals.faint_bg_color)
-                .corner_radius(6.0)
-                .inner_margin(12.0)
-                .show(ui, |ui| {
-                    render_inlines(ui, inlines, font_size, &c.marks, c.mark_bg, false);
-                });
-            ui.add_space(8.0);
+            let f = c.style("blockquote", font_size, false, 0.0, 8.0, ref_w);
+            ui.add_space(f.before);
+            let pad = f.pad.unwrap_or([12.0, 12.0, 12.0, 12.0]);
+            block_frame(&f, pad, ui, |ui| {
+                render_inlines(ui, inlines, &f, &c.marks, c.mark_bg);
+            });
+            ui.add_space(f.after);
         }
         Block::Code { text, lang } => {
-            Frame::new()
-                .fill(ui.style().visuals.faint_bg_color)
-                .corner_radius(6.0)
-                .inner_margin(10.0)
-                .show(ui, |ui| {
-                    // The panel spans the whole column so its width does not
-                    // follow the length of the longest line.
-                    ui.set_width(ui.available_width());
-                    let job = hilite::code_job(
-                        text,
-                        lang,
-                        font_size * 0.92,
-                        ui.style().visuals.dark_mode,
-                    );
-                    ui.add(Label::new(job).selectable(true));
-                });
-            ui.add_space(8.0);
+            let f = c.style("pre", font_size * 0.92, false, 0.0, 8.0, ref_w);
+            let f = c.mono(f);
+            ui.add_space(f.before);
+            let pad = f.pad.unwrap_or([10.0, 10.0, 10.0, 10.0]);
+            block_frame(&f, pad, ui, |ui| {
+                // The panel spans the whole column so its width does not
+                // follow the length of the longest line.
+                ui.set_width(ui.available_width());
+                let mut job = hilite::code_job(
+                    text,
+                    lang,
+                    f.size,
+                    ui.style().visuals.dark_mode,
+                );
+                if let Some(col) = f.color {
+                    for s in job.sections.iter_mut() {
+                        s.format.color = col;
+                    }
+                }
+                ui.add(Label::new(job).selectable(true));
+            });
+            ui.add_space(f.after);
         }
         Block::Image { src, .. } => {
             if let Some(tex) = load_block_image(c, ui, src) {
                 let size = tex.size_vec2();
-                let max_w = (ui.available_width() - 24.0).max(120.0);
+                let cap = c
+                    .css
+                    .as_ref()
+                    .and_then(|s| s.own("img").max_width)
+                    .map(|l| l.px(font_size, ref_w - 24.0));
+                let max_w = match cap {
+                    Some(v) => v.min(ref_w - 24.0).max(60.0),
+                    None => (ref_w - 24.0).max(120.0),
+                };
                 let scale = (max_w / size.x).min(1.0) * zoom;
                 ui.add(egui::Image::new(&tex).max_size(size * scale));
                 ui.add_space(6.0);
@@ -2016,9 +2599,73 @@ fn render_block(
             }
         }
         Block::Divider => {
-            ui.add_space(6.0);
+            let f = c.style("hr", font_size, false, 6.0, 6.0, ref_w);
+            ui.add_space(f.before);
             ui.separator();
-            ui.add_space(6.0);
+            ui.add_space(f.after);
+        }
+    }
+}
+
+/// Draw a block, wrapped in the frame its stylesheet asked for.
+///
+/// Without a stylesheet only the existing quote/code cards get a frame, so the
+/// reader's default look is untouched.
+fn show_block_frame(
+    c: &Ctx,
+    ui: &mut egui::Ui,
+    f: &Fmt,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    if c.css.is_none() || (f.bg.is_none() && f.border.is_none() && f.pad.is_none()) {
+        content(ui);
+        return;
+    }
+    let pad = f.pad.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+    block_frame(f, pad, ui, content);
+}
+
+/// A rounded panel carrying the CSS background, padding and left border.
+fn block_frame(
+    f: &Fmt,
+    pad: [f32; 4],
+    ui: &mut egui::Ui,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    let fill = f
+        .bg
+        .unwrap_or_else(|| ui.style().visuals.faint_bg_color);
+    let margin = egui::Margin {
+        left: pad[3].clamp(0.0, 96.0).round() as i8,
+        right: pad[1].clamp(0.0, 96.0).round() as i8,
+        top: pad[0].clamp(0.0, 96.0).round() as i8,
+        bottom: pad[2].clamp(0.0, 96.0).round() as i8,
+    };
+    let frame = Frame::new().fill(fill).corner_radius(6.0).inner_margin(margin);
+    // A CSS background or border belongs to the block, not to the glyphs: the
+    // panel has to span the text column instead of hugging the longest line.
+    let inner = |ui: &mut egui::Ui| {
+        ui.set_width(ui.available_width());
+        content(ui);
+    };
+    match f.border {
+        Some((w, col)) => {
+            let resp = frame.show(ui, inner);
+            let rect = resp.response.rect;
+            let r = rect.expand(0.5);
+            ui.painter().rect(
+                egui::Rect::from_min_max(
+                    egui::pos2(r.min.x, r.min.y),
+                    egui::pos2(r.min.x + w, r.max.y),
+                ),
+                0.0,
+                col,
+                egui::Stroke::NONE,
+                egui::StrokeKind::Inside,
+            );
+        }
+        None => {
+            frame.show(ui, inner);
         }
     }
 }
@@ -2029,10 +2676,9 @@ fn render_block(
 fn render_inlines(
     ui: &mut egui::Ui,
     inlines: &[Inline],
-    size: f32,
+    f: &Fmt,
     marks: &[String],
     mark_bg: Color32,
-    strong: bool,
 ) {
     let text: String = inlines.iter().map(|i| i.text.as_str()).collect();
     let ranges = if marks.is_empty() {
@@ -2041,6 +2687,16 @@ fn render_inlines(
         mark_ranges(&text, marks)
     };
     let mut job = egui::text::LayoutJob::default();
+    job.halign = f.align.unwrap_or(Align::Min);
+    if f.indent > 0.0 {
+        // CSS `text-indent` only shifts the first line. Ideographic spaces are
+        // the unit Chinese typesetting uses for it, so a whole number of them
+        // reproduces `2em` without a custom layout pass.
+        let n = (f.indent / f.size.max(1.0)).round() as usize;
+        RichText::new("　".repeat(n.clamp(1, 8)))
+            .size(f.size)
+            .append_to(&mut job, ui.style(), egui::FontSelection::Default, Align::Min);
+    }
     let mut base = 0usize;
     for inl in inlines {
         let mut off = 0usize;
@@ -2058,16 +2714,24 @@ fn render_inlines(
                     .unwrap_or(inl.text.len())
                     .min(inl.text.len()),
             };
-            let mut rt = inline_richtext(&inl.text[off..cut], &inl.style, size, strong);
+            let mut rt = inline_richtext(&inl.text[off..cut], &inl.style, f);
             if hit.is_some() {
                 rt = rt.background_color(mark_bg);
             }
+            let from = job.sections.len();
             rt.append_to(
                 &mut job,
                 ui.style(),
                 egui::FontSelection::Default,
                 Align::Max,
             );
+            // A stylesheet colour has to beat the reading theme's own override,
+            // which RichText applies while appending.
+            if let Some(col) = f.color {
+                for s in job.sections[from..].iter_mut() {
+                    s.format.color = col;
+                }
+            }
             off = cut;
         }
         base += inl.text.len();
@@ -2078,22 +2742,44 @@ fn render_inlines(
     ui.add(Label::new(job).selectable(true));
 }
 
-fn inline_richtext(text: &str, style: &Style, size: f32, strong: bool) -> RichText {
-    let rt = match style {
-        Style::Normal => RichText::new(text).size(size),
-        Style::Bold => RichText::new(text).size(size).strong(),
-        Style::Italic => RichText::new(text).size(size).italics(),
-        Style::BoldItalic => RichText::new(text).size(size).strong().italics(),
-        Style::Code => RichText::new(text)
-            .size(size)
-            .font(FontId::monospace(size))
-            .color(Color32::from_rgb(0xB0, 0x30, 0x60)),
-    };
-    if strong {
-        rt.strong()
-    } else {
-        rt
+fn inline_richtext(text: &str, style: &Style, f: &Fmt) -> RichText {
+    let mut rt = RichText::new(text).size(f.size);
+    if let Some(fam) = &f.family {
+        rt = rt.font(FontId::new(f.size, fam.clone()));
     }
+    if f.line_h.is_some() {
+        rt = rt.line_height(f.line_h);
+    }
+    if f.italic {
+        rt = rt.italics();
+    }
+    if f.underline {
+        rt = rt.underline();
+    }
+    if f.strike {
+        rt = rt.strikethrough();
+    }
+    match style {
+        Style::Normal => {}
+        Style::Bold => {
+            rt = rt.strong();
+        }
+        Style::Italic => {
+            rt = rt.italics();
+        }
+        Style::BoldItalic => {
+            rt = rt.strong().italics();
+        }
+        Style::Code => {
+            rt = rt
+                .font(FontId::monospace(f.size))
+                .color(Color32::from_rgb(0xB0, 0x30, 0x60));
+        }
+    }
+    if f.bold {
+        rt = rt.strong()
+    }
+    rt
 }
 
 /// Byte ranges of `text` covered by any mark. Both sides are compared with
@@ -2182,19 +2868,497 @@ fn build_style(ctx: &egui::Context, dark: bool) {
         egui::Theme::Light
     };
     let mut style = egui::Style::default();
-    style.visuals = if dark {
+    let mut v = if dark {
         egui::Visuals::dark()
     } else {
         egui::Visuals::light()
     };
-    if !dark {
-        style.visuals.extreme_bg_color = Color32::from_rgb(0xFB, 0xF8, 0xF1);
-        style.visuals.panel_fill = Color32::from_rgb(0xF6, 0xF3, 0xEC);
+    let accent = style::accent(dark);
+
+    // Paper-tinted surfaces keep the reading area and the chrome distinguishable
+    // without a second theme switch. The chrome is a cool neutral so the warm
+    // reading paper stands out as the page, not as another panel.
+    if dark {
+        v.panel_fill = Color32::from_rgb(0x1C, 0x1E, 0x22);
+        v.window_fill = Color32::from_rgb(0x16, 0x17, 0x1A);
+        v.faint_bg_color = Color32::from_rgb(0x26, 0x2A, 0x30);
+        v.extreme_bg_color = Color32::from_rgb(0x0F, 0x10, 0x13);
+    } else {
+        v.panel_fill = Color32::from_rgb(0xF2, 0xF3, 0xF5);
+        v.window_fill = Color32::from_rgb(0xFA, 0xFB, 0xFC);
+        v.faint_bg_color = Color32::from_rgb(0xE8, 0xEA, 0xEE);
+        v.extreme_bg_color = Color32::from_rgb(0xFF, 0xFF, 0xFF);
     }
+    v.override_text_color = None;
+    v.selection.bg_fill = style::accent_soft(dark, 46);
+    v.selection.stroke = egui::Stroke::new(1.0, accent);
+    v.hyperlink_color = accent;
+    v.widgets.noninteractive.bg_fill = v.panel_fill;
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(
+        1.0,
+        if dark {
+            Color32::from_rgb(0x33, 0x38, 0x3F)
+        } else {
+            Color32::from_rgb(0xDD, 0xE1, 0xE7)
+        },
+    );
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, v.text_color());
+    for w in [
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        w.corner_radius = 7.0.into();
+        w.bg_stroke.width = 0.0;
+    }
+    v.widgets.inactive.weak_bg_fill = if dark {
+        Color32::from_rgb(0x2E, 0x32, 0x38)
+    } else {
+        Color32::from_rgb(0xEC, 0xE7, 0xDC)
+    };
+    v.widgets.hovered.weak_bg_fill = style::accent_soft(dark, 34);
+    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, accent);
+    v.widgets.active.weak_bg_fill = accent;
+    v.widgets.active.fg_stroke = egui::Stroke::new(1.0, if dark {
+        Color32::from_rgb(0x14, 0x16, 0x1A)
+    } else {
+        Color32::WHITE
+    });
+    style.visuals = v;
+
+    style.spacing.item_spacing = Vec2::new(7.0, 4.0);
+    style.spacing.button_padding = Vec2::new(9.0, 5.0);
+    style.spacing.window_margin = egui::Margin::same(0);
+    style.spacing.slider_width = 120.0;
+    for (name, size) in [
+        (egui::TextStyle::Small, 12.0),
+        (egui::TextStyle::Body, 14.0),
+        (egui::TextStyle::Button, 13.5),
+        (egui::TextStyle::Heading, 19.0),
+        (egui::TextStyle::Monospace, 13.0),
+    ] {
+        if let Some(id) = style.text_styles.get_mut(&name) {
+            id.size = size;
+        }
+    }
+
     ctx.set_style_of(theme, style);
     // Activating the theme is what actually repaints the UI; set_style_of alone
     // only edits the (possibly inactive) theme's style.
     ctx.set_theme(theme);
+}
+
+/// The blue the reader points with, for the current frame's theme.
+fn accent(ui: &egui::Ui) -> Color32 {
+    style::accent(ui.visuals().dark_mode)
+}
+
+/// Toolbar glyphs, drawn as vectors.
+///
+/// egui bundles no icon font and the CJK reading fonts turn most pictographs
+/// into tofu boxes, so every glyph here is a handful of strokes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Icon {
+    OpenFile,
+    OpenDir,
+    Refresh,
+    Panel,
+    Pen,
+    Tools,
+    Sun,
+    Moon,
+    PageSingle,
+    PageDouble,
+    Mark,
+    Trash,
+    Jump,
+    Copy,
+    Quote,
+    Close,
+    Plus,
+}
+
+impl Icon {
+    fn paint(self, p: &egui::Painter, r: egui::Rect, col: Color32, bg: Color32) {
+        let s = egui::Stroke::new(1.4, col);
+        let (x0, y0, x1, y1) = (r.min.x, r.min.y, r.max.x, r.max.y);
+        let c = r.center();
+        let line = |a: egui::Pos2, b: egui::Pos2| p.line_segment([a, b], s);
+        let poly = |pts: Vec<egui::Pos2>, fill: Color32| {
+            p.add(egui::Shape::convex_polygon(pts, fill, s));
+        };
+        match self {
+            Icon::OpenFile => {
+                poly(
+                    vec![
+                        egui::pos2(x0 + 3.0, y0 + 0.5),
+                        egui::pos2(x1 - 4.0, y0 + 0.5),
+                        egui::pos2(x1 - 1.0, y0 + 3.5),
+                        egui::pos2(x1 - 1.0, y1 - 0.5),
+                        egui::pos2(x0 + 3.0, y1 - 0.5),
+                    ],
+                    Color32::TRANSPARENT,
+                );
+                line(egui::pos2(x1 - 4.0, y0 + 0.5), egui::pos2(x1 - 4.0, y0 + 3.5));
+                line(egui::pos2(x1 - 4.0, y0 + 3.5), egui::pos2(x1 - 1.0, y0 + 3.5));
+                line(egui::pos2(x0 + 5.0, c.y + 1.5), egui::pos2(x0 + 9.5, c.y + 1.5));
+                line(egui::pos2(x0 + 7.25, c.y - 0.75), egui::pos2(x0 + 7.25, c.y + 3.75));
+            }
+            Icon::OpenDir => {
+                poly(
+                    vec![
+                        egui::pos2(x0 + 1.0, y0 + 3.0),
+                        egui::pos2(x0 + 5.5, y0 + 3.0),
+                        egui::pos2(x0 + 7.0, y0 + 5.0),
+                        egui::pos2(x1 - 1.0, y0 + 5.0),
+                        egui::pos2(x1 - 1.0, y1 - 2.0),
+                        egui::pos2(x0 + 1.0, y1 - 2.0),
+                    ],
+                    Color32::TRANSPARENT,
+                );
+                line(egui::pos2(x0 + 1.0, y0 + 3.0), egui::pos2(x0 + 1.0, y1 - 2.0));
+            }
+            Icon::Refresh => {
+                p.add(egui::Shape::circle_stroke(c, r.width() * 0.34, s));
+                // Break the ring and add an arrowhead so it reads as "reload".
+                p.line_segment(
+                    [
+                        egui::pos2(c.x + r.width() * 0.34, c.y),
+                        egui::pos2(c.x + r.width() * 0.34 - 3.0, c.y - 2.5),
+                    ],
+                    s,
+                );
+                p.line_segment(
+                    [
+                        egui::pos2(c.x + r.width() * 0.34, c.y),
+                        egui::pos2(c.x + r.width() * 0.34 - 3.0, c.y + 2.5),
+                    ],
+                    s,
+                );
+                p.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(c.x + r.width() * 0.34 - 1.0, c.y - 1.6),
+                        egui::pos2(c.x + r.width() * 0.34 + 1.6, c.y + 1.6),
+                    ),
+                    0.0,
+                    col,
+                );
+            }
+            Icon::Panel => {
+                p.rect(r.shrink(1.0), 2.0, Color32::TRANSPARENT, s, egui::StrokeKind::Inside);
+                line(
+                    egui::pos2(x0 + 1.0 + r.width() * 0.36, y0 + 1.0),
+                    egui::pos2(x0 + 1.0 + r.width() * 0.36, y1 - 1.0),
+                );
+            }
+            Icon::Pen => {
+                poly(
+                    vec![
+                        egui::pos2(x0 + 2.0, y1 - 2.0),
+                        egui::pos2(x0 + 3.0, y1 - 5.5),
+                        egui::pos2(x1 - 3.0, y0 + 1.0),
+                        egui::pos2(x1 - 1.0, y0 + 3.0),
+                        egui::pos2(x0 + 5.5, y1 - 3.0),
+                    ],
+                    Color32::TRANSPARENT,
+                );
+            }
+            Icon::Tools => {
+                // Mouse pointer.
+                poly(
+                    vec![
+                        egui::pos2(x0 + 3.0, y0 + 1.0),
+                        egui::pos2(x0 + 3.0, y1 - 3.0),
+                        egui::pos2(x0 + 6.0, y1 - 5.5),
+                        egui::pos2(x0 + 8.0, y1 - 1.0),
+                        egui::pos2(x0 + 10.0, y1 - 2.0),
+                        egui::pos2(x0 + 8.0, y1 - 6.0),
+                        egui::pos2(x1 - 1.5, y1 - 6.5),
+                    ],
+                    Color32::TRANSPARENT,
+                );
+            }
+            Icon::Sun => {
+                p.add(egui::Shape::circle_filled(c, r.width() * 0.22, col));
+                for i in 0..8 {
+                    let a = i as f32 * std::f32::consts::TAU / 8.0;
+                    let (dx, dy) = (a.cos(), a.sin());
+                    line(
+                        egui::pos2(c.x + dx * r.width() * 0.32, c.y + dy * r.width() * 0.32),
+                        egui::pos2(c.x + dx * r.width() * 0.46, c.y + dy * r.width() * 0.46),
+                    );
+                }
+            }
+            Icon::Moon => {
+                let mut pts = Vec::new();
+                let ro = r.width() * 0.44;
+                for i in 0..=12 {
+                    let a = std::f32::consts::FRAC_PI_2 * 0.7 + i as f32 / 12.0 * std::f32::consts::TAU * 0.72;
+                    pts.push(egui::pos2(c.x + a.cos() * ro, c.y + a.sin() * ro));
+                }
+                for i in (0..=10).rev() {
+                    let a = std::f32::consts::FRAC_PI_2 * 0.7 + i as f32 / 10.0 * std::f32::consts::TAU * 0.72;
+                    pts.push(egui::pos2(
+                        c.x + 2.2 + a.cos() * ro * 0.72,
+                        c.y + a.sin() * ro * 0.72,
+                    ));
+                }
+                p.add(egui::Shape::convex_polygon(pts, col, egui::Stroke::NONE));
+            }
+            Icon::PageSingle => {
+                p.rect(r.shrink(2.0), 1.5, Color32::TRANSPARENT, s, egui::StrokeKind::Inside);
+            }
+            Icon::PageDouble => {
+                let half = r.width() * 0.42;
+                p.rect(
+                    egui::Rect::from_min_size(r.min + egui::vec2(1.0, 2.0), Vec2::new(half, r.height() - 4.0)),
+                    1.5,
+                    Color32::TRANSPARENT,
+                    s,
+                    egui::StrokeKind::Inside,
+                );
+                p.rect(
+                    egui::Rect::from_min_size(
+                        egui::pos2(r.max.x - 1.0 - half, r.min.y + 2.0),
+                        Vec2::new(half, r.height() - 4.0),
+                    ),
+                    1.5,
+                    Color32::TRANSPARENT,
+                    s,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            Icon::Mark => {
+                // Highlighter swipe: a thick slanted tip over an underline.
+                p.line_segment(
+                    [egui::pos2(x0 + 3.0, y1 - 5.0), egui::pos2(x1 - 4.0, y0 + 1.5)],
+                    egui::Stroke::new(3.4, col),
+                );
+                line(egui::pos2(x0 + 1.5, y1 - 1.5), egui::pos2(x1 - 1.5, y1 - 1.5));
+            }
+            Icon::Trash => {
+                line(egui::pos2(x0 + 2.0, y0 + 3.0), egui::pos2(x1 - 2.0, y0 + 3.0));
+                line(egui::pos2(c.x - 2.0, y0 + 3.0), egui::pos2(c.x - 2.0, y0 + 1.5));
+                line(egui::pos2(c.x - 2.0, y0 + 1.5), egui::pos2(c.x + 2.0, y0 + 1.5));
+                line(egui::pos2(c.x + 2.0, y0 + 1.5), egui::pos2(c.x + 2.0, y0 + 3.0));
+                poly(
+                    vec![
+                        egui::pos2(x0 + 3.5, y0 + 3.0),
+                        egui::pos2(x1 - 3.5, y0 + 3.0),
+                        egui::pos2(x1 - 4.5, y1 - 1.0),
+                        egui::pos2(x0 + 4.5, y1 - 1.0),
+                    ],
+                    Color32::TRANSPARENT,
+                );
+            }
+            Icon::Jump => {
+                line(egui::pos2(x0 + 2.0, c.y), egui::pos2(x1 - 4.0, c.y));
+                line(egui::pos2(x1 - 4.0, c.y), egui::pos2(x1 - 7.0, c.y - 3.0));
+                line(egui::pos2(x1 - 4.0, c.y), egui::pos2(x1 - 7.0, c.y + 3.0));
+                line(egui::pos2(x1 - 1.5, y0 + 2.0), egui::pos2(x1 - 1.5, y1 - 2.0));
+            }
+            Icon::Copy => {
+                p.rect(
+                    egui::Rect::from_min_size(r.min + egui::vec2(1.0, 1.0), Vec2::new(r.width() - 5.0, r.height() - 5.0)),
+                    1.5,
+                    Color32::TRANSPARENT,
+                    s,
+                    egui::StrokeKind::Inside,
+                );
+                p.rect(
+                    egui::Rect::from_min_size(r.min + egui::vec2(4.0, 4.0), Vec2::new(r.width() - 5.0, r.height() - 5.0)),
+                    1.5,
+                    bg,
+                    s,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            Icon::Quote => {
+                for dx in [0.0, r.width() * 0.42] {
+                    p.add(egui::Shape::convex_polygon(
+                        vec![
+                            egui::pos2(x0 + 3.0 + dx, y0 + 2.0),
+                            egui::pos2(x0 + 6.5 + dx, y0 + 2.0),
+                            egui::pos2(x0 + 5.0 + dx, y1 - 2.0),
+                            egui::pos2(x0 + 2.5 + dx, y1 - 2.0),
+                        ],
+                        col,
+                        egui::Stroke::NONE,
+                    ));
+                }
+            }
+            Icon::Close => {
+                line(egui::pos2(x0 + 3.0, y0 + 3.0), egui::pos2(x1 - 3.0, y1 - 3.0));
+                line(egui::pos2(x1 - 3.0, y0 + 3.0), egui::pos2(x0 + 3.0, y1 - 3.0));
+            }
+            Icon::Plus => {
+                line(egui::pos2(c.x - 4.0, c.y), egui::pos2(c.x + 4.0, c.y));
+                line(egui::pos2(c.x, c.y - 4.0), egui::pos2(c.x, c.y + 4.0));
+            }
+        }
+    }
+}
+
+/// A button with a vector glyph in front of its label.
+fn icon_button(ui: &mut egui::Ui, icon: Icon, label: &str, tip: &str, selected: bool) -> bool {
+    icon_button_at(ui, icon, label, tip, selected, false)
+}
+
+/// `small` shrinks the control for row-embedded actions like 删除 / 跳转.
+fn icon_button_at(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    tip: &str,
+    selected: bool,
+    small: bool,
+) -> bool {
+    let font = FontId::proportional(if small { 12.0 } else { 13.0 });
+    let tw = if label.is_empty() {
+        0.0
+    } else {
+        ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font.clone(), Color32::WHITE).size().x)
+    };
+    let pad = if small { 4.0 } else { 8.0 };
+    let gap = if label.is_empty() { 0.0 } else { 6.0 };
+    let icon_sz = if small { 12.0 } else { 14.0 };
+    let h = if small { 20.0 } else { 24.0 };
+    let size = Vec2::new(pad * 2.0 + icon_sz + gap + tw, h);
+    let (rect, resp) = ui.allocate_at_least(size, egui::Sense::click());
+    let enabled = ui.is_enabled();
+    let w = ui.style().interact(&resp);
+    let acc = accent(ui);
+    let fill = if selected {
+        style::accent_soft(ui.visuals().dark_mode, 40)
+    } else if enabled && (resp.is_pointer_button_down_on() || resp.hovered()) {
+        w.weak_bg_fill
+    } else {
+        Color32::TRANSPARENT
+    };
+    let fg = if !enabled {
+        ui.visuals().weak_text_color()
+    } else if selected {
+        acc
+    } else {
+        w.fg_stroke.color
+    };
+    ui.painter().rect(
+        rect,
+        w.corner_radius,
+        fill,
+        if selected {
+            egui::Stroke::new(1.0, acc)
+        } else {
+            egui::Stroke::NONE
+        },
+        egui::StrokeKind::Inside,
+    );
+    let ir = egui::Rect::from_min_size(
+        egui::pos2(rect.min.x + pad, rect.center().y - icon_sz / 2.0),
+        Vec2::splat(icon_sz),
+    );
+    icon.paint(ui.painter(), ir, fg, ui.visuals().window_fill);
+    if !label.is_empty() {
+        ui.painter().text(
+            egui::pos2(ir.max.x + gap, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            font,
+            fg,
+        );
+    }
+    if !tip.is_empty() {
+        resp.clone().on_hover_text(tip);
+    }
+    enabled && resp.clicked()
+}
+
+/// A panel header: an accent bar, a bold title that truncates instead of
+/// pushing the controls off-screen, and right-aligned actions.
+fn panel_header(ui: &mut egui::Ui, title: &str, reserve: f32, actions: impl FnOnce(&mut egui::Ui)) {
+    let row_h = 26.0;
+    let full = ui.available_rect_before_wrap();
+    let accent = accent(ui);
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(full.min.x + 1.0, full.min.y + 5.0),
+        egui::pos2(full.min.x + 4.0, full.min.y + row_h - 5.0),
+    );
+    ui.painter().rect_filled(bar, 1.5, accent);
+    let title_w = (full.width() - reserve - 12.0).max(48.0);
+    ui.horizontal(|ui| {
+        ui.add_space(10.0);
+        ui.allocate_ui_with_layout(
+            Vec2::new(title_w, row_h),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.add(
+                    Label::new(RichText::new(title).size(14.5).strong().color(accent))
+                        .truncate(),
+                )
+                .on_hover_text(title);
+            },
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), actions);
+    });
+    ui.add_space(2.0);
+    ui.separator();
+}
+
+/// A sub-section title inside a panel: a short accent bar, a bold name and an
+/// optional count.
+fn section_head(ui: &mut egui::Ui, title: &str, count: usize) {
+    let accent = accent(ui);
+    let full = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(full.min.x, full.min.y + 3.0),
+            egui::pos2(full.min.x + 3.0, full.min.y + 17.0),
+        ),
+        1.5,
+        accent,
+    );
+    ui.horizontal(|ui| {
+        ui.add_space(7.0);
+        ui.label(RichText::new(title).size(13.0).strong().color(accent));
+        if count > 0 {
+            ui.label(RichText::new(count.to_string()).size(11.5).weak());
+        }
+    });
+    ui.add_space(3.0);
+}
+
+/// A card on the panel background: soft fill, hairline edge, rounded corners.
+fn card(ui: &mut egui::Ui, fill: Color32, inner: impl FnOnce(&mut egui::Ui)) {
+    let stroke = ui.style().visuals.widgets.noninteractive.bg_stroke.clone();
+    Frame::new()
+        .fill(fill)
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin {
+            left: 9,
+            right: 9,
+            top: 7,
+            bottom: 7,
+        })
+        .stroke(stroke)
+        .show(ui, inner);
+}
+
+/// A rounded tinted band around a cluster of controls, so the tool bars read as
+/// groups rather than a row of loose widgets.
+fn group(ui: &mut egui::Ui, inner: impl FnOnce(&mut egui::Ui)) {
+    let s = ui.style();
+    Frame::new()
+        .fill(s.visuals.faint_bg_color)
+        .stroke(s.visuals.widgets.noninteractive.bg_stroke.clone())
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin {
+            left: 6,
+            right: 6,
+            top: 2,
+            bottom: 2,
+        })
+        .show(ui, inner);
 }
 
 fn shorten(s: &str, n: usize) -> String {

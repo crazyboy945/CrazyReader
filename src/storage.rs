@@ -52,6 +52,9 @@ pub struct Settings {
     /// Expanded branches of the folder tree.
     #[serde(default)]
     pub folder_open: Vec<String>,
+    /// Stylesheet applied to Markdown documents.
+    #[serde(default)]
+    pub css: Option<String>,
 }
 
 impl Default for Settings {
@@ -64,6 +67,7 @@ impl Default for Settings {
             font: String::new(),
             folder: None,
             folder_open: Vec::new(),
+            css: None,
         }
     }
 }
