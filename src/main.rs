@@ -1168,6 +1168,9 @@ impl eframe::App for ReaderApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    // Not `.strong()`: strong text takes the active widget colour,
+                    // which is white-on-accent here, so the page info vanished on
+                    // the light status bar (and went near-black in dark mode).
                     ui.label(
                         RichText::new(format!(
                             "{} · 第 {} / {total} 页 · {:.0}%",
@@ -1176,7 +1179,7 @@ impl eframe::App for ReaderApp {
                             (page_now + 1) as f32 * 100.0 / total.max(1) as f32
                         ))
                         .size(12.5)
-                        .strong(),
+                        .color(ui.visuals().text_color()),
                     );
                     ui.add_space(4.0);
                     group(ui, |ui| {
@@ -1260,15 +1263,32 @@ impl eframe::App for ReaderApp {
                                 for (name, v) in style::BG_PRESETS {
                                     let sel = *v == bg_now;
                                     let sw = swatch_color(*v);
-                                    if ui
-                                        .selectable_label(
+                                    // The swatch is painted, not part of the label: colouring
+                                    // the text with the preset made light presets read as
+                                    // white-on-white in the light theme.
+                                    let row = ui.horizontal(|ui| {
+                                        let (rect, _) = ui
+                                            .allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
+                                        ui.painter().rect(
+                                            rect.shrink(1.0),
+                                            3.0,
+                                            sw,
+                                            egui::Stroke::new(
+                                                1.0,
+                                                ui.visuals()
+                                                    .widgets
+                                                    .noninteractive
+                                                    .bg_stroke
+                                                    .color,
+                                            ),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                        ui.selectable_label(
                                             sel,
-                                            RichText::new(format!("■ {name}"))
-                                                .color(sw)
-                                                .size(13.5),
+                                            RichText::new(*name).size(13.5),
                                         )
-                                        .clicked()
-                                    {
+                                    });
+                                    if row.inner.clicked() {
                                         new_bg = Some(*v);
                                     }
                                 }
@@ -1673,8 +1693,8 @@ fn clamp_tools(pos: egui::Pos2, ctx: &egui::Context) -> egui::Pos2 {
 }
 
 /// The floating selection toolbar: 标记 / 摘录 / 笔记 / 复制, all on one row
-/// with the close button at the right end. It opens where the drag ended and
-/// moves by its header; the next selection brings it back.
+/// with the close button at the right end. It opens near the selection; the
+/// next selection brings it back.
 fn selection_tools(st: &mut AppState, ctx: &egui::Context) {
     let Some(pos) = st.sel_tools_pos else {
         return;
@@ -1705,22 +1725,6 @@ fn selection_tools(st: &mut AppState, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 5.0;
-                        let head = ui.add(
-                            Label::new(
-                                RichText::new(format!(
-                                    "选中 · {}",
-                                    shorten(sel.as_deref().unwrap_or("无"), 14)
-                                ))
-                                .size(11.5)
-                                .weak(),
-                            )
-                            .sense(egui::Sense::drag()),
-                        );
-                        if head.dragged() {
-                            st.sel_tools_pos = Some(clamp_tools(pos + head.drag_delta(), ctx));
-                        }
-                        head.on_hover_text("按住此处可拖动悬浮窗");
-                        ui.separator();
                         for (icon, label, key, tip) in [
                             (
                                 Icon::Mark,
@@ -2311,8 +2315,12 @@ fn empty_view(st: &mut AppState, ui: &mut egui::Ui) {
         ui.add_space(70.0);
         if ui
             .add(
-                egui::Button::new(RichText::new("打开文件").size(18.0).strong())
-                    .min_size(Vec2::new(180.0, 44.0)),
+                egui::Button::new(
+                    RichText::new("打开文件")
+                        .size(18.0)
+                        .color(ui.visuals().text_color()),
+                )
+                .min_size(Vec2::new(180.0, 44.0)),
             )
             .clicked()
         {
@@ -2349,7 +2357,11 @@ fn empty_view(st: &mut AppState, ui: &mut egui::Ui) {
         if !st.lib.books.is_empty() {
             ui.add_space(24.0);
             ui.separator();
-            ui.strong("最近阅读");
+            ui.label(
+                RichText::new("最近阅读")
+                    .size(14.0)
+                    .color(ui.visuals().text_color()),
+            );
             let mut recent: Vec<_> = st.lib.books.values().collect();
             recent.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
             for e in recent.iter().take(8) {
@@ -2714,7 +2726,7 @@ fn render_inlines(
                     .unwrap_or(inl.text.len())
                     .min(inl.text.len()),
             };
-            let mut rt = inline_richtext(&inl.text[off..cut], &inl.style, f);
+            let mut rt = inline_richtext(&inl.text[off..cut], &inl.style, f, ui.style());
             if hit.is_some() {
                 rt = rt.background_color(mark_bg);
             }
@@ -2742,7 +2754,20 @@ fn render_inlines(
     ui.add(Label::new(job).selectable(true));
 }
 
-fn inline_richtext(text: &str, style: &Style, f: &Fmt) -> RichText {
+/// Bold in egui has no font weight — `strong()` only swaps in the active widget
+/// colour, which is white-on-accent here, so bold words disappeared on paper.
+/// Emphasise against the reading area's own text colour instead.
+fn bold_color(style: &egui::Style) -> Color32 {
+    match style.visuals.override_text_color {
+        Some(c) => {
+            let l = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
+            if l < 140.0 { Color32::BLACK } else { Color32::WHITE }
+        }
+        None => style.visuals.widgets.noninteractive.fg_stroke.color,
+    }
+}
+
+fn inline_richtext(text: &str, style: &Style, f: &Fmt, ui_style: &egui::Style) -> RichText {
     let mut rt = RichText::new(text).size(f.size);
     if let Some(fam) = &f.family {
         rt = rt.font(FontId::new(f.size, fam.clone()));
@@ -2762,13 +2787,13 @@ fn inline_richtext(text: &str, style: &Style, f: &Fmt) -> RichText {
     match style {
         Style::Normal => {}
         Style::Bold => {
-            rt = rt.strong();
+            rt = rt.color(bold_color(ui_style));
         }
         Style::Italic => {
             rt = rt.italics();
         }
         Style::BoldItalic => {
-            rt = rt.strong().italics();
+            rt = rt.color(bold_color(ui_style)).italics();
         }
         Style::Code => {
             rt = rt
@@ -2776,8 +2801,8 @@ fn inline_richtext(text: &str, style: &Style, f: &Fmt) -> RichText {
                 .color(Color32::from_rgb(0xB0, 0x30, 0x60));
         }
     }
-    if f.bold {
-        rt = rt.strong()
+    if f.bold && !matches!(style, Style::Code) {
+        rt = rt.color(bold_color(ui_style));
     }
     rt
 }
@@ -2931,6 +2956,9 @@ fn build_style(ctx: &egui::Context, dark: bool) {
     style.spacing.button_padding = Vec2::new(9.0, 5.0);
     style.spacing.window_margin = egui::Margin::same(0);
     style.spacing.slider_width = 120.0;
+    // The background menu carries ten rows plus the colour picker; the default
+    // 200px cap clipped it mid-row and hid the last presets.
+    style.spacing.combo_height = 420.0;
     for (name, size) in [
         (egui::TextStyle::Small, 12.0),
         (egui::TextStyle::Body, 14.0),
