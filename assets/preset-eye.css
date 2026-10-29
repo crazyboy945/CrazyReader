@@ -1,0 +1,120 @@
+/* 内置样式：护眼绿
+ *
+ * 国内阅读器默认的“豆沙绿”护眼色（#C7EDCC 的降饱和版本，长时间看不刺眼），
+ * 字号放大到 18px、行距 2.0，段落首行缩进两字。夜间换成月光灰。
+ */
+
+body {
+  font-size: 18px;
+  line-height: 2.0;
+  font-family: "微软雅黑", "Microsoft YaHei", sans-serif;
+  color: #2E3B2F;
+  background: #D7E9D2;
+  max-width: 32em;
+}
+
+h1 {
+  font-size: 1.6em;
+  text-align: center;
+  color: #23402A;
+  margin: 26px 0 18px;
+}
+
+h2 {
+  font-size: 1.35em;
+  color: #2C5236;
+  margin: 22px 0 10px;
+}
+
+h3 {
+  font-size: 1.15em;
+  color: #38613F;
+  margin: 18px 0 8px;
+}
+
+p {
+  text-indent: 2em;
+  margin: 0 0 10px;
+}
+
+li {
+  margin: 5px 0;
+  color: #2E3B2F;
+}
+
+a {
+  color: #1B6E45;
+  text-decoration: underline;
+}
+
+blockquote {
+  background: #CBE0C6;
+  border-left: 5px solid #7FA881;
+  color: #35492F;
+  padding: 10px 16px;
+  margin: 16px 0;
+}
+
+pre {
+  background: #C6DAC1;
+  color: #22301F;
+  padding: 14px;
+  font-family: Consolas, monospace;
+  font-size: .85em;
+}
+
+code {
+  color: #A04B2A;
+  font-family: Consolas, monospace;
+}
+
+hr {
+  color: #9DBA9B;
+  margin: 26px 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #C3CEC4;
+    background: #25302A;
+  }
+
+  h1 {
+    color: #DCE7DC;
+  }
+
+  h2 {
+    color: #B9D3BC;
+  }
+
+  h3 {
+    color: #A8C4AB;
+  }
+
+  li {
+    color: #C3CEC4;
+  }
+
+  a {
+    color: #7FCBA0;
+  }
+
+  blockquote {
+    background: #2C3931;
+    border-left: 5px solid #5F7F66;
+    color: #B6C6B7;
+  }
+
+  pre {
+    background: #1C2520;
+    color: #C3CEC4;
+  }
+
+  code {
+    color: #E0A070;
+  }
+
+  hr {
+    color: #4C5C50;
+  }
+}

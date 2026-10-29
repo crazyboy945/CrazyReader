@@ -205,14 +205,39 @@ fn mix(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
 pub fn reading_theme(bg: Option<u32>) -> Option<ReadingTheme> {
     let v = bg?;
     let rgb = ((v >> 16) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8);
-    let lum = 0.299 * rgb.0 as f32 + 0.587 * rgb.1 as f32 + 0.114 * rgb.2 as f32;
-    let (text, soft) = if lum > 140.0 {
-        ((0x24, 0x22, 0x1E), (0x8A, 0x86, 0x7C))
+    Some(theme_from_paper(Color32::from_rgb(rgb.0, rgb.1, rgb.2), None, false))
+}
+
+/// Reading palette for a paper colour that came from a stylesheet.
+///
+/// The sheet's own ink is only used when it actually contrasts with its paper;
+/// a colour that has drifted near the background (an unreadable `#F5F5F5` on
+/// `#F2EBD9`, say) is dropped in favour of one derived from the paper itself.
+pub fn theme_from_paper(fill: Color32, ink: Option<Color32>, ink_set: bool) -> ReadingTheme {
+    let a = fill.to_array();
+    let rgb = (a[0], a[1], a[2]);
+    let lum = luminance(rgb);
+    let light = lum > 140.0;
+    let fallback = if light {
+        (0x24, 0x22, 0x1E)
     } else {
-        ((0xD8, 0xD6, 0xD0), (0x96, 0x94, 0x8E))
+        (0xD8, 0xD6, 0xD0)
     };
-    Some(ReadingTheme {
-        fill: Color32::from_rgb(rgb.0, rgb.1, rgb.2),
+    let soft = if light {
+        (0x8A, 0x86, 0x7C)
+    } else {
+        (0x96, 0x94, 0x8E)
+    };
+    let asked = ink.map(|c| {
+        let i = c.to_array();
+        (i[0], i[1], i[2])
+    });
+    let text = match asked {
+        Some(c) if ink_set && (luminance(c) - lum).abs() >= 60.0 => c,
+        _ => fallback,
+    };
+    ReadingTheme {
+        fill,
         text: Color32::from_rgb(text.0, text.1, text.2),
         faint: {
             let c = mix(rgb, soft, 0.18);
@@ -222,5 +247,9 @@ pub fn reading_theme(bg: Option<u32>) -> Option<ReadingTheme> {
             let c = mix(rgb, text, 0.08);
             Color32::from_rgb(c.0, c.1, c.2)
         },
-    })
+    }
+}
+
+fn luminance(rgb: (u8, u8, u8)) -> f32 {
+    0.299 * rgb.0 as f32 + 0.587 * rgb.1 as f32 + 0.114 * rgb.2 as f32
 }

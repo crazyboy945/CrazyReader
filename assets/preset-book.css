@@ -1,0 +1,120 @@
+/* 内置样式：书籍
+ *
+ * 取自 Tufte CSS：象牙色纸面、衬线大字、标题不加粗也不上颜色，靠字号拉开层次，
+ * 引文用一条蓝色竖线挂在左边。
+ */
+
+body {
+  font-size: 17px;
+  line-height: 1.8;
+  font-family: "宋体", Georgia, serif;
+  color: #111111;
+  background: #FFFFF8;
+  max-width: 34em;
+}
+
+h1 {
+  font-size: 2.6em;
+  font-weight: normal;
+  line-height: 1.1;
+  margin: 32px 0 6px;
+  color: #111111;
+}
+
+h2 {
+  font-size: 1.5em;
+  font-weight: normal;
+  margin: 28px 0 4px;
+}
+
+h3 {
+  font-size: 1.2em;
+  font-weight: normal;
+  font-style: italic;
+  margin: 20px 0 4px;
+}
+
+h4 {
+  font-size: 1em;
+  font-style: italic;
+}
+
+p {
+  margin: 1.4em 0 0;
+  text-align: left;
+}
+
+li {
+  margin: 6px 0;
+  color: #333333;
+}
+
+a {
+  color: #A00000;
+  text-decoration: none;
+}
+
+blockquote {
+  color: #333333;
+  border-left: 5px solid #111111;
+  background: #F8F7F0;
+  padding: 10px 18px;
+  margin: 1.8em 0;
+  font-style: italic;
+}
+
+pre {
+  background: #F4F4EF;
+  color: #111111;
+  padding: 14px 18px;
+  font-family: Consolas, monospace;
+  font-size: .85em;
+}
+
+code {
+  color: #A00000;
+  font-family: Consolas, monospace;
+}
+
+hr {
+  color: #C9C6B8;
+  margin: 32px 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #D6D3C8;
+    background: #1D1D1A;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    color: #E6E3D8;
+  }
+
+  li,
+  blockquote {
+    color: #C3C0B6;
+  }
+
+  blockquote {
+    background: #26261F;
+    border-left: 5px solid #8C8878;
+  }
+
+  pre {
+    background: #232320;
+    color: #D6D3C8;
+  }
+
+  a,
+  code {
+    color: #E58C8C;
+  }
+
+  hr {
+    color: #4A4A42;
+  }
+}

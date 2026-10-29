@@ -81,9 +81,14 @@ struct AppState {
     sel_tools_pos: Option<egui::Pos2>,
     /// excerpt the note being written refers to
     note_quote: Option<String>,
-    /// parsed user stylesheet, applied to Markdown documents
+    /// parsed user stylesheet, already projected onto the current theme
     css: Option<Rc<Sheet>>,
-    css_path: Option<PathBuf>,
+    /// the same stylesheet with both day and night blocks still in it
+    css_raw: Option<Rc<Sheet>>,
+    /// what the 样式 menu shows: a built-in style name or a stylesheet path
+    css_style: Option<String>,
+    /// declarations the active stylesheet could not be read with
+    css_errors: Vec<String>,
     /// mtime the stylesheet was last read at, so edits reload it
     css_mtime: Option<std::time::SystemTime>,
     css_check: Instant,
@@ -100,11 +105,19 @@ impl ReaderApp {
     fn new(ctx: &egui::Context) -> Self {
         let (lib, config_file) = Library::load();
         let settings = lib.settings.clone();
-        let css_path = settings.css.as_ref().map(PathBuf::from);
+        let css_style = settings.css.clone().filter(|s| !s.is_empty());
         let mut fonts = FontManager::new();
-        let css = css_path.as_ref().and_then(|p| load_sheet(p));
+        let loaded = match css_style.as_deref() {
+            Some(name) if css::presets::find(name).is_some() => css_preset_sheet(name),
+            Some(path) => css_file_sheet(Path::new(path)),
+            None => None,
+        };
+        let (css_raw, css_errors) = match loaded {
+            Some((s, e)) if !s.is_empty() => (Some(s), e),
+            _ => (None, Vec::new()),
+        };
         let font_key = fonts
-            .apply(ctx, &settings.font, &sheet_fonts(css.as_ref()))
+            .apply(ctx, &settings.font, &sheet_fonts(css_raw.as_deref()))
             .unwrap_or_else(|| settings.font.clone());
         let mut st = AppState {
             lib,
@@ -150,8 +163,10 @@ impl ReaderApp {
             selection: None,
             sel_tools_pos: None,
             note_quote: None,
-            css: css.map(Rc::new),
-            css_path,
+            css: themed_sheet(css_raw.as_deref(), settings.dark).map(Rc::new),
+            css_raw,
+            css_style,
+            css_errors,
             css_mtime: None,
             css_check: Instant::now(),
             sel_sink: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -349,35 +364,62 @@ fn save_now(st: &mut AppState) {
             .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect(),
-        css: st
-            .css_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string()),
+        css: st.css_style.clone(),
     };
     Library::save(&st.lib, &st.config_file);
     st.last_save = Instant::now();
 }
 
 /// Read and parse the stylesheet at `path`; unreadable files are simply absent.
-fn load_sheet(path: &Path) -> Option<Sheet> {
+fn css_file_sheet(path: &Path) -> Option<(Rc<Sheet>, Vec<String>)> {
     let text = std::fs::read_to_string(path).ok()?;
-    Some(css::parse(&text))
+    let (sheet, errors) = css::parse(&text);
+    Some((Rc::new(sheet), errors))
+}
+
+/// The built-in style named in the settings, if that is what the value is.
+fn css_preset_sheet(name: &str) -> Option<(Rc<Sheet>, Vec<String>)> {
+    let (sheet, errors) = css::presets::sheet(name)?;
+    Some((Rc::new(sheet), errors))
+}
+
+/// Keep only the blocks that speak about the paper colour we are reading on.
+fn themed_sheet(raw: Option<&Sheet>, dark: bool) -> Option<Sheet> {
+    raw.map(|s| s.with_theme(dark))
 }
 
 fn sheet_fonts(css: Option<&Sheet>) -> Vec<String> {
     css.map(|s| s.fonts()).unwrap_or_default()
 }
 
-/// (Re)read the user stylesheet and install any face it names.
+/// Read whichever stylesheet the 样式 menu points at: a built-in name or a file.
+fn active_sheet(st: &AppState) -> Option<(Rc<Sheet>, Vec<String>)> {
+    let style = st.css_style.as_deref()?;
+    let loaded = match css::presets::find(style) {
+        Some(_) => css_preset_sheet(style),
+        None => css_file_sheet(Path::new(style)),
+    };
+    loaded.filter(|(s, _)| !s.is_empty())
+}
+
+/// (Re)read the stylesheet — a user file or a built-in style — and install any
+/// face it names.
 fn reload_css(st: &mut AppState, ctx: &egui::Context) {
-    let sheet = st.css_path.as_deref().and_then(load_sheet);
+    let loaded = active_sheet(st);
     st.css_mtime = st
-        .css_path
+        .css_style
         .as_deref()
+        .filter(|s| css::presets::find(s).is_none())
         .and_then(|p| std::fs::metadata(p).ok())
         .and_then(|m| m.modified().ok());
-    let extras = sheet_fonts(sheet.as_ref());
-    st.css = sheet.map(Rc::new).filter(|s| !s.is_empty());
+    let (raw, errors) = match loaded {
+        Some((s, e)) => (Some(s), e),
+        None => (None, Vec::new()),
+    };
+    let extras = raw.as_deref().map(|s| s.fonts()).unwrap_or_default();
+    st.css_errors = errors;
+    st.css_raw = raw.clone();
+    st.css = themed_sheet(raw.as_deref(), st.dark).map(Rc::new);
     if let Some(k) = st.fonts.apply(ctx, &st.font_key, &extras) {
         st.font_key = k;
     }
@@ -453,8 +495,9 @@ impl eframe::App for ReaderApp {
         if st.css_check.elapsed().as_secs_f32() > 1.5 {
             st.css_check = Instant::now();
             let changed = st
-                .css_path
+                .css_style
                 .as_deref()
+                .filter(|s| css::presets::find(s).is_none())
                 .and_then(|p| std::fs::metadata(p).ok())
                 .and_then(|m| m.modified().ok())
                 .is_some_and(|t| Some(t) != st.css_mtime);
@@ -609,7 +652,7 @@ impl eframe::App for ReaderApp {
                     if has_books {
                         // The active tab is painted in the reading paper colour so it
                         // looks like the top edge of the page it opens onto.
-                        let theme = style::reading_theme(st.bg);
+                        let theme = resolve_reading_theme(st.bg, st.css.as_deref());
                         let page_fill = theme
                             .map(|t| t.fill)
                             .unwrap_or(ui.style().visuals.window_fill);
@@ -791,10 +834,11 @@ impl eframe::App for ReaderApp {
             st.folder_cache = tree_cache;
             apply_folder_events(st, ev);
             let bg = st.bg;
+            let paper = resolve_reading_theme(bg, st.css.as_deref());
             egui::CentralPanel::default()
-                .frame(reading_frame(ui, bg))
+                .frame(reading_frame(ui, paper))
                 .show(ui, |ui| {
-                    apply_reading_colors(ui, bg);
+                    apply_reading_colors(ui, paper);
                     empty_view(st, ui);
                 });
             return;
@@ -1144,17 +1188,23 @@ impl eframe::App for ReaderApp {
         let mut new_bg: Option<Option<u32>> = None;
         let sel_now = st.selection.clone();
         let mut mark_clicked = false;
-        let css_now = st.css_path.clone();
+        // The menu's value is either a built-in style name or a stylesheet path.
+        let css_now = st.css_style.clone();
+        let css_is_preset = css_now.as_deref().is_some_and(|s| css::presets::find(s).is_some());
         let css_label = css_now
             .as_ref()
-            .and_then(|p| {
-                p.file_name()
-                    .map(|n| shorten(&n.to_string_lossy(), 18))
+            .map(|s| {
+                if css::presets::find(s).is_some() {
+                    s.clone()
+                } else {
+                    shorten(Path::new(s).file_name().unwrap_or_default().to_str().unwrap_or(s), 18)
+                }
             })
             .unwrap_or_else(|| "无（内置样式）".to_string());
         let mut css_pick = false;
         let mut css_clear = false;
         let mut css_reload = false;
+        let mut css_preset_pick: Option<&'static str> = None;
         egui::Panel::bottom("status")
             .frame(
                 Frame::new()
@@ -1314,42 +1364,36 @@ impl eframe::App for ReaderApp {
                                 .selected_text(css_label)
                                 .width(150.0)
                                 .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(
-                                            css_now.is_none(),
-                                            RichText::new("无（内置样式）").size(13.5),
-                                        )
+                                    let row = |ui: &mut egui::Ui, on: bool, text: String| {
+                                        ui.selectable_label(on, RichText::new(text).size(13.5))
+                                    };
+                                    if row(ui, css_now.is_none(), "无（内置样式）".into())
                                         .clicked()
                                     {
                                         css_clear = true;
                                     }
-                                    if ui
-                                        .selectable_label(
-                                            false,
-                                            RichText::new("选择 CSS 文件…").size(13.5),
-                                        )
-                                        .clicked()
-                                    {
+                                    ui.separator();
+                                    ui.label(RichText::new("内置样式").size(11.5).weak());
+                                    for p in css::presets::PRESETS {
+                                        let on = css_now.as_deref() == Some(p.name);
+                                        if row(ui, on, p.name.into()).clicked() {
+                                            css_preset_pick = Some(p.name);
+                                        }
+                                    }
+                                    ui.separator();
+                                    if row(ui, false, "选择 CSS 文件…".into()).clicked() {
                                         css_pick = true;
                                     }
-                                    if css_now.is_some() {
-                                        if ui
-                                            .selectable_label(
-                                                false,
-                                                RichText::new("重新载入").size(13.5),
-                                            )
-                                            .clicked()
-                                        {
+                                    if !css_is_preset {
+                                        if row(ui, false, "重新载入".into()).clicked() {
                                             css_reload = true;
                                         }
-                                        if let Some(s) = st.css.as_deref() {
-                                            for e in s.errors.iter().take(4) {
-                                                ui.label(
-                                                    RichText::new(e)
-                                                        .size(11.5)
-                                                        .color(Color32::from_rgb(0xC0, 0x30, 0x3C)),
-                                                );
-                                            }
+                                        for e in st.css_errors.iter().take(4) {
+                                            ui.label(
+                                                RichText::new(e.clone())
+                                                    .size(11.5)
+                                                    .color(Color32::from_rgb(0xC0, 0x30, 0x3C)),
+                                            );
                                         }
                                     }
                                 });
@@ -1391,7 +1435,7 @@ impl eframe::App for ReaderApp {
                 .add_filter("CSS 样式表", &["css"])
                 .pick_file()
             {
-                st.css_path = Some(file.clone());
+                st.css_style = Some(file.to_string_lossy().to_string());
                 reload_css(st, &ctx);
                 save_now(st);
                 st.status = match &file.file_name() {
@@ -1401,9 +1445,18 @@ impl eframe::App for ReaderApp {
                 ui.ctx().request_repaint();
             }
         }
+        if let Some(name) = css_preset_pick {
+            st.css_style = Some(name.to_string());
+            reload_css(st, &ctx);
+            save_now(st);
+            st.status = format!("已应用内置样式「{name}」");
+            ui.ctx().request_repaint();
+        }
         if css_clear {
-            st.css_path = None;
+            st.css_style = None;
             st.css = None;
+            st.css_raw = None;
+            st.css_errors.clear();
             st.css_mtime = None;
             st.status = "已改用内置样式".to_string();
             save_now(st);
@@ -1431,6 +1484,11 @@ impl eframe::App for ReaderApp {
         }
         if theme_toggle {
             st.dark = !st.dark;
+            // A stylesheet carries a day and a night palette; the one in use is
+            // projected from it, so the switch has to re-project.
+            if st.css_raw.is_some() {
+                reload_css(st, &ctx);
+            }
             save_now(st);
         }
         if set_single && st.double_page {
@@ -1463,9 +1521,10 @@ impl eframe::App for ReaderApp {
         let scale = st.font_size / BASE_FONT_SIZE;
         let body = css
             .as_ref()
-            .and_then(|s| s.own("body").font_size)
+            .and_then(|s| s.own("body").font_size())
             .map(|l| l.px(BASE_FONT_SIZE, 0.0))
             .unwrap_or(BASE_FONT_SIZE);
+        let paper = resolve_reading_theme(bg, css.as_deref());
         let mut c = Ctx {
             st,
             doc: &doc,
@@ -1483,9 +1542,9 @@ impl eframe::App for ReaderApp {
             area = area.vertical_scroll_offset(off.max(0.0));
         }
         let out = egui::CentralPanel::default()
-            .frame(reading_frame(ui, bg))
+            .frame(reading_frame(ui, paper))
             .show(ui, |ui| {
-                apply_reading_colors(ui, bg);
+                apply_reading_colors(ui, paper);
                 area.show(ui, |ui| {
                     render_page(&mut c, ui);
                 })
@@ -1613,32 +1672,39 @@ impl Ctx<'_> {
         };
         let own = sheet.own(sel);
         let inh = sheet.rule(&[sel]);
-        if let Some(l) = own.font_size {
+        if let Some(l) = own.font_size() {
             f.size = l.px(self.body, self.body) * self.scale;
         }
-        if let Some(b) = own.bold {
+        if let Some(b) = own.bold() {
             f.bold = b;
         }
-        f.italic = inh.italic.unwrap_or(false);
-        f.underline = inh.underline.unwrap_or(false);
-        f.strike = inh.strike.unwrap_or(false);
-        f.color = inh.color;
-        f.bg = own.background;
-        if let Some(l) = inh.line_height {
+        f.italic = inh.italic().unwrap_or(false);
+        f.underline = inh.underline().unwrap_or(false);
+        f.strike = inh.strike().unwrap_or(false);
+        f.color = inh.color();
+        f.bg = own.background();
+        if let Some(l) = inh.line_height() {
             f.line_h = Some(l.px(f.size, f.size).clamp(f.size, f.size * 4.0));
         }
-        f.align = own.text_align.map(|a| match a {
+        f.align = own.text_align().map(|a| match a {
             css::TextAlign::Center => Align::Center,
             css::TextAlign::Right => Align::Max,
-            css::TextAlign::Left => Align::Min,
+            // egui justifies nothing, so a sheet asking for it gets a left edge.
+            css::TextAlign::Left | css::TextAlign::Justify => Align::Min,
         });
-        f.indent = own.text_indent.map(|l| l.px(f.size, ref_w)).unwrap_or(0.0);
-        f.before = own.margin_top.map(|l| l.px(f.size, ref_w)).unwrap_or(before);
+        f.indent = own
+            .text_indent()
+            .map(|l| l.px(f.size, ref_w))
+            .unwrap_or(0.0);
+        f.before = own
+            .margin_top()
+            .map(|l| l.px(f.size, ref_w))
+            .unwrap_or(before);
         f.after = own
-            .margin_bottom
+            .margin_bottom()
             .map(|l| l.px(f.size, ref_w))
             .unwrap_or(after);
-        f.pad = own.padding.map(|p| {
+        f.pad = own.padding().map(|p| {
             [
                 p[0].px(f.size, ref_w),
                 p[1].px(f.size, ref_w),
@@ -1646,8 +1712,8 @@ impl Ctx<'_> {
                 p[3].px(f.size, ref_w),
             ]
         });
-        f.border = own.border_left.map(|(w, c)| (w * self.scale, c));
-        f.family = inh.font_family.as_deref().and_then(|name| {
+        f.border = own.border_left().map(|(w, c)| (w * self.scale, c));
+        f.family = inh.font_family().as_deref().and_then(|name| {
             let key = css::font_key(name)?;
             if key == "mono" {
                 Some(egui::FontFamily::Monospace)
@@ -2287,17 +2353,35 @@ fn bg_label(v: Option<u32>) -> String {
     }
 }
 
-fn reading_frame(ui: &egui::Ui, bg: Option<u32>) -> Frame {
-    let fill = style::reading_theme(bg)
+/// The reading-area palette: an explicit background colour wins over the paper
+/// the stylesheet asks for, and either one needs matching text and panel tints,
+/// otherwise a dark sheet on the light theme is unreadable.
+fn resolve_reading_theme(
+    bg: Option<u32>,
+    sheet: Option<&css::Sheet>,
+) -> Option<style::ReadingTheme> {
+    if bg.is_some() {
+        return style::reading_theme(bg);
+    }
+    let sheet = sheet?.own("body");
+    let fill = sheet.background()?;
+    if fill.a() == 0 {
+        return None;
+    }
+    let ink = sheet.color();
+    Some(style::theme_from_paper(fill, ink, ink.is_some()))
+}
+
+fn reading_frame(ui: &egui::Ui, theme: Option<style::ReadingTheme>) -> Frame {
+    let fill = theme
         .map(|t| t.fill)
         .unwrap_or_else(|| ui.style().visuals.panel_fill);
     Frame::new().inner_margin(8.0).fill(fill)
 }
 
-/// A custom paper colour also needs matching text and panel tints, otherwise
-/// dark backgrounds stay unreadable under the light theme.
-fn apply_reading_colors(ui: &mut egui::Ui, bg: Option<u32>) {
-    let Some(t) = style::reading_theme(bg) else {
+/// Paint the paper colours derived above onto the reading area only.
+fn apply_reading_colors(ui: &mut egui::Ui, theme: Option<style::ReadingTheme>) {
+    let Some(t) = theme else {
         return;
     };
     let s = ui.style_mut();
@@ -2560,7 +2644,7 @@ fn render_block(
                 let cap = c
                     .css
                     .as_ref()
-                    .and_then(|s| s.own("img").max_width)
+                    .and_then(|s| s.own("img").max_width())
                     .map(|l| l.px(font_size, ref_w - 24.0));
                 let max_w = match cap {
                     Some(v) => v.min(ref_w - 24.0).max(60.0),
@@ -2751,7 +2835,23 @@ fn render_inlines(
     if job.is_empty() {
         return;
     }
-    ui.add(Label::new(job).selectable(true));
+    let mut label = Label::new(job).selectable(true);
+    if let Some(align) = f.align {
+        label = label.halign(align);
+    }
+    // A `Label` is allocated exactly its galley's width, so `halign` on its own
+    // can only shift text inside that width; centring needs the item rect to be
+    // centred in the available width, which a top-down layout does.
+    match f.align {
+        Some(align @ (Align::Center | Align::Max)) => {
+            ui.with_layout(egui::Layout::top_down(align), |ui| {
+                ui.add(label);
+            });
+        }
+        _ => {
+            ui.add(label);
+        }
+    }
 }
 
 /// Bold in egui has no font weight — `strong()` only swaps in the active widget

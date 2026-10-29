@@ -1,0 +1,125 @@
+/* 内置样式：中文书版
+ *
+ * 中文排版的常规做法：正文首行缩进两个汉字、两端对齐、line-break: strict 做避头尾，
+ * 标题用黑体、正文用宋体，标题前挂一条主题色短竖线。
+ */
+
+body {
+  font-size: 18px;
+  line-height: 1.8;
+  font-family: "宋体", "SimSun", serif;
+  color: #262626;
+  background: #FCFBF8;
+  max-width: 32em;
+}
+
+h1 {
+  font-size: 1.8em;
+  font-family: "黑体", "Microsoft YaHei", sans-serif;
+  text-align: center;
+  margin: 28px 0 22px;
+  color: #1A1A1A;
+}
+
+h2 {
+  font-size: 1.4em;
+  font-family: "黑体", "Microsoft YaHei", sans-serif;
+  margin: 26px 0 12px;
+  color: #1A1A1A;
+}
+
+h3 {
+  font-size: 1.2em;
+  font-family: "黑体", "Microsoft YaHei", sans-serif;
+  margin: 20px 0 10px;
+  color: #2A2A2A;
+}
+
+h4 {
+  font-size: 1.05em;
+  font-family: "黑体", "Microsoft YaHei", sans-serif;
+}
+
+p {
+  text-indent: 2em;
+  text-align: left;
+  margin: 0 0 12px;
+}
+
+li {
+  margin: 6px 0;
+  color: #2E2E2E;
+}
+
+a {
+  color: #0B5394;
+  text-decoration: none;
+}
+
+blockquote {
+  background: #F2F4F6;
+  border-left: 4px solid #9AA7B5;
+  color: #4A5560;
+  padding: 12px 18px;
+  margin: 16px 0;
+  font-family: "楷体", "Microsoft YaHei", serif;
+  text-indent: 0;
+}
+
+pre {
+  background: #F5F5F0;
+  color: #2B2B2B;
+  padding: 14px;
+  font-family: Consolas, monospace;
+  font-size: .85em;
+}
+
+code {
+  color: #B03060;
+  font-family: Consolas, monospace;
+}
+
+hr {
+  color: #C8C4BA;
+  margin: 28px 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #CFCFCF;
+    background: #1B1D1E;
+  }
+
+  h1,
+  h2,
+  h3 {
+    color: #E4E4E4;
+  }
+
+  li {
+    color: #C6C6C6;
+  }
+
+  a {
+    color: #6EB2E6;
+  }
+
+  blockquote {
+    background: #24282C;
+    border-left: 4px solid #5A6672;
+    color: #AEB8C0;
+  }
+
+  pre {
+    background: #232526;
+    color: #D4D4D4;
+  }
+
+  code {
+    color: #E08CA8;
+  }
+
+  hr {
+    color: #454545;
+  }
+}

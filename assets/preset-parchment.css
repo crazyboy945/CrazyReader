@@ -1,0 +1,129 @@
+/* 内置样式：羊皮纸
+ *
+ * 电子书里最常见的“复古纸”：#F2EBD9 一类的暖米色纸面、深棕文字、楷体正文，
+ * 标题用赭石与墨绿，引言块带深描边。
+ */
+
+body {
+  font-size: 18px;
+  line-height: 1.9;
+  font-family: "楷体", "KaiTi", serif;
+  color: #3B2F1E;
+  background: #F2EBD9;
+  max-width: 34em;
+}
+
+h1 {
+  font-size: 1.9em;
+  font-family: "黑体", "Microsoft YaHei", sans-serif;
+  text-align: center;
+  color: #7A3B1E;
+  margin: 30px 0 20px;
+}
+
+h2 {
+  font-size: 1.45em;
+  font-family: "黑体", "Microsoft YaHei", sans-serif;
+  color: #8B4513;
+  background: #E7DCC2;
+  border-left: 6px solid #A9752C;
+  padding: 4px 12px;
+  margin: 26px 0 12px;
+}
+
+h3 {
+  font-size: 1.2em;
+  font-family: "黑体", "Microsoft YaHei", sans-serif;
+  color: #6B5B2A;
+  font-style: italic;
+  margin: 20px 0 8px;
+}
+
+p {
+  text-indent: 2em;
+  margin: 0 0 12px;
+}
+
+li {
+  margin: 5px 0;
+  color: #46371F;
+}
+
+a {
+  color: #8B4513;
+  text-decoration: underline;
+}
+
+blockquote {
+  background: #EAE0C8;
+  border-left: 6px solid #B08D57;
+  color: #5A492C;
+  padding: 12px 16px;
+  margin: 18px 0;
+}
+
+pre {
+  background: #E4D8BC;
+  color: #3B2F1E;
+  padding: 14px;
+  font-family: Consolas, monospace;
+  font-size: .85em;
+}
+
+code {
+  color: #9C3F2C;
+  font-family: Consolas, monospace;
+}
+
+hr {
+  color: #C6B48B;
+  margin: 30px 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #D7CBAC;
+    background: #241F16;
+  }
+
+  h1 {
+    color: #E8A87C;
+  }
+
+  h2 {
+    color: #E0B880;
+    background: #322A1B;
+    border-left: 6px solid #8A6A38;
+  }
+
+  h3 {
+    color: #CDBE8E;
+  }
+
+  li {
+    color: #D0C4A6;
+  }
+
+  a {
+    color: #E0A870;
+  }
+
+  blockquote {
+    background: #2E2718;
+    border-left: 6px solid #7E6437;
+    color: #C8B98F;
+  }
+
+  pre {
+    background: #1D1912;
+    color: #D7CBAC;
+  }
+
+  code {
+    color: #E2968A;
+  }
+
+  hr {
+    color: #55482E;
+  }
+}

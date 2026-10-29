@@ -1,0 +1,137 @@
+/* 内置样式：文档
+ *
+ * 取自 GitHub 的 markdown 样式表（github-markdown-css）：标题只用一条灰线分隔，
+ * 代码块是浅灰圆角卡片，链接走蓝色。夜间配色写在 prefers-color-scheme 里。
+ */
+
+body {
+  font-size: 16px;
+  line-height: 1.6;
+  font-family: "Microsoft YaHei", -apple-system, "Segoe UI", sans-serif;
+  color: #1F2328;
+  background: #FFFFFF;
+  max-width: 46em;
+}
+
+h1 {
+  font-size: 2em;
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 24px 0 16px;
+  color: #1F2328;
+}
+
+h2 {
+  font-size: 1.5em;
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 24px 0 16px;
+  color: #1F2328;
+}
+
+h3 {
+  font-size: 1.25em;
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 20px 0 12px;
+}
+
+h4 {
+  font-size: 1em;
+  font-weight: 600;
+}
+
+h5 {
+  font-size: .875em;
+  font-weight: 600;
+}
+
+h6 {
+  font-size: .85em;
+  font-weight: 600;
+  color: #656D76;
+}
+
+p {
+  margin: 0 0 16px;
+}
+
+li {
+  margin: 4px 0;
+}
+
+a {
+  color: #0969DA;
+  text-decoration: underline;
+}
+
+blockquote {
+  color: #59636E;
+  border-left: 4px solid #D0D7DE;
+  padding: 2px 16px;
+  margin: 0 0 16px;
+}
+
+pre {
+  background: #F6F8FA;
+  color: #1F2328;
+  padding: 16px;
+  margin: 0 0 16px;
+  font-family: Consolas, monospace;
+  font-size: .9em;
+}
+
+code {
+  background: #EFF1F3;
+  color: #1F2328;
+  padding: 2px 6px;
+  font-family: Consolas, monospace;
+  font-size: .9em;
+}
+
+hr {
+  color: #D8DEE4;
+  margin: 24px 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #E6EDF3;
+    background: #0D1117;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5 {
+    color: #E6EDF3;
+  }
+
+  h6 {
+    color: #9198A1;
+  }
+
+  a {
+    color: #4493F8;
+  }
+
+  blockquote {
+    color: #9198A1;
+    border-left: 4px solid #3D444D;
+  }
+
+  pre {
+    background: #161B22;
+    color: #E6EDF3;
+  }
+
+  code {
+    background: #22262B;
+    color: #E6EDF3;
+  }
+
+  hr {
+    color: #3D444D;
+  }
+}

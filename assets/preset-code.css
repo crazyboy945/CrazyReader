@@ -1,0 +1,82 @@
+/* 内置样式：编辑器
+ *
+ * 照 VS Code Dark+ 的取色：深蓝灰底、浅灰字、蓝紫链接、粉色标识符。
+ * 这套不写 prefers-color-scheme，两种主题下都是同一块“屏幕感”深色纸。
+ */
+
+body {
+  font-size: 16px;
+  line-height: 1.75;
+  font-family: "Microsoft YaHei", Consolas, sans-serif;
+  color: #D4D4D4;
+  background: #1E212B;
+  max-width: 44em;
+}
+
+h1 {
+  font-size: 1.7em;
+  color: #569CD6;
+  margin: 26px 0 14px;
+}
+
+h2 {
+  font-size: 1.35em;
+  color: #4FC1FF;
+  background: #262B38;
+  border-left: 5px solid #4FC1FF;
+  padding: 3px 12px;
+  margin: 22px 0 10px;
+}
+
+h3 {
+  font-size: 1.15em;
+  color: #DCDCAA;
+  margin: 18px 0 8px;
+}
+
+h4 {
+  font-size: 1em;
+  color: #C586C0;
+}
+
+p {
+  margin: 0 0 12px;
+}
+
+li {
+  margin: 4px 0;
+  color: #CCCCCC;
+}
+
+a {
+  color: #4FC1FF;
+  text-decoration: underline;
+}
+
+blockquote {
+  background: #262B38;
+  border-left: 5px solid #6A737D;
+  color: #B8C4D0;
+  padding: 10px 16px;
+  margin: 16px 0;
+}
+
+pre {
+  background: #171922;
+  color: #E1E4E8;
+  padding: 14px;
+  font-family: Consolas, monospace;
+  font-size: .9em;
+}
+
+code {
+  background: #2A2F3C;
+  color: #CE9178;
+  padding: 2px 6px;
+  font-family: Consolas, monospace;
+}
+
+hr {
+  color: #3E4451;
+  margin: 24px 0;
+}
