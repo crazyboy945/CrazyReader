@@ -3219,20 +3219,36 @@ impl Icon {
                 }
             }
             Icon::Moon => {
-                let mut pts = Vec::new();
+                // A crescent is concave and epaint only fills convex polygons,
+                // so sweep the bite circle's centre: every ray that leaves the
+                // moon circle again gives one thin, always-convex quad.
                 let ro = r.width() * 0.44;
-                for i in 0..=12 {
-                    let a = std::f32::consts::FRAC_PI_2 * 0.7 + i as f32 / 12.0 * std::f32::consts::TAU * 0.72;
-                    pts.push(egui::pos2(c.x + a.cos() * ro, c.y + a.sin() * ro));
+                let rb = ro * 0.82;
+                let b = c + egui::vec2(ro * 0.46, -ro * 0.34);
+                let d = b - c;
+                let edge = egui::Stroke::new(0.5, col);
+                let mut prev: Option<(egui::Pos2, egui::Pos2)> = None;
+                for i in 0..=72 {
+                    let a = i as f32 * std::f32::consts::TAU / 72.0;
+                    let u = egui::vec2(a.cos(), a.sin());
+                    let du = d.dot(u);
+                    let disc = du * du - (d.length_sq() - ro * ro);
+                    let t = if disc > 0.0 { -du + disc.sqrt() } else { 0.0 };
+                    if disc <= 0.0 || t <= rb * 1.04 {
+                        prev = None;
+                        continue;
+                    }
+                    let inner = b + u * rb;
+                    let outer = b + u * t;
+                    if let Some((pi, po)) = prev {
+                        p.add(egui::Shape::convex_polygon(
+                            vec![pi, po, outer, inner],
+                            col,
+                            edge,
+                        ));
+                    }
+                    prev = Some((inner, outer));
                 }
-                for i in (0..=10).rev() {
-                    let a = std::f32::consts::FRAC_PI_2 * 0.7 + i as f32 / 10.0 * std::f32::consts::TAU * 0.72;
-                    pts.push(egui::pos2(
-                        c.x + 2.2 + a.cos() * ro * 0.72,
-                        c.y + a.sin() * ro * 0.72,
-                    ));
-                }
-                p.add(egui::Shape::convex_polygon(pts, col, egui::Stroke::NONE));
             }
             Icon::PageSingle => {
                 p.rect(r.shrink(2.0), 1.5, Color32::TRANSPARENT, s, egui::StrokeKind::Inside);
